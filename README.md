@@ -20,7 +20,7 @@ SleepSentinel 是一个 Windows 托盘常驻工具，目标是解决两类场景
 - 本地日志
 - 一键导出诊断报告
 - 开机自启
-- 自包含发布和 Inno Setup 安装脚本
+- 小体积单文件发布和 Inno Setup 安装脚本
 
 ## 重要说明
 
@@ -48,7 +48,7 @@ SleepSentinel 是一个 Windows 托盘常驻工具，目标是解决两类场景
 
 ```powershell
 dotnet restore
-dotnet publish .\SleepSentinel.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
+dotnet publish .\SleepSentinel.csproj -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true
 ```
 
 输出目录通常在：
@@ -67,6 +67,8 @@ bin\Release\net8.0-windows\win-x64\publish\
 
 - 每次推送 `main` 都会自动构建 Windows x64 版本并上传到 Actions Artifacts
 - 推送形如 `v1.0.0` 的标签时，会自动创建 GitHub Release 并附带 `SleepSentinel-win-x64.zip`
+
+当前 Release 采用 `framework-dependent` 小体积单文件发布，因此目标电脑需要安装 `.NET 8 Desktop Runtime`。
 
 ## 诊断报告
 
