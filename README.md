@@ -61,6 +61,13 @@ bin\Release\net8.0-windows\win-x64\publish\
 
 如果已安装 Inno Setup，打开 [SleepSentinel.iss](/mnt/c/Users/zhang/projects/SleepSentinel/SleepSentinel.iss) 编译即可生成安装程序。
 
+## GitHub 下载
+
+仓库接入了 GitHub Actions：
+
+- 每次推送 `main` 都会自动构建 Windows x64 版本并上传到 Actions Artifacts
+- 推送形如 `v1.0.0` 的标签时，会自动创建 GitHub Release 并附带 `SleepSentinel-win-x64.zip`
+
 ## 诊断报告
 
 面板中的“导出诊断报告”会生成一个文本文件，默认输出到：
