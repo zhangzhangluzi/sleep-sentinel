@@ -70,8 +70,8 @@ GitHub Release 也会自动附带：
 
 仓库接入了 GitHub Actions：
 
-- 每次推送 `main` 都会自动构建 Windows x64 版本并上传到 Actions Artifacts
-- 推送形如 `v1.0.0` 的标签时，会自动创建 GitHub Release 并附带 `SleepSentinel-win-x64.zip`
+- 每次推送 `main` 都会自动构建并上传安装程序 Artifact
+- 推送形如 `v1.0.0` 的标签时，会自动创建 GitHub Release，并只附带 `SleepSentinel-Setup-win-x64.exe`
 
 当前 Release 采用 `framework-dependent` 小体积单文件发布，因此目标电脑需要安装 `.NET 8 Desktop Runtime`。
 

@@ -27,14 +27,6 @@ jobs:
       - name: Publish app
         run: dotnet publish .\SleepSentinel.csproj -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true
 
-      - name: Package publish output
-        shell: pwsh
-        run: |
-          $publishDir = "bin\Release\net8.0-windows\win-x64\publish"
-          $zipPath = "SleepSentinel-win-x64.zip"
-          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-          Compress-Archive -Path "$publishDir\*" -DestinationPath $zipPath
-
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
@@ -42,12 +34,6 @@ jobs:
         shell: pwsh
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" ".\SleepSentinel.iss"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: SleepSentinel-win-x64
-          path: SleepSentinel-win-x64.zip
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
@@ -63,11 +49,7 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
-          $files = @(
-            "bin/Release/net8.0-windows/win-x64/publish/SleepSentinel.exe",
-            "SleepSentinel-win-x64.zip",
-            "installer/SleepSentinel-Setup-win-x64.exe"
-          )
+          $files = @("installer/SleepSentinel-Setup-win-x64.exe")
 
           gh release view $tag --repo $repo *> $null
           if ($LASTEXITCODE -eq 0) {
