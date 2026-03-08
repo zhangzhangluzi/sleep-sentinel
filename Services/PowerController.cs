@@ -32,10 +32,22 @@ public sealed class PowerController : IDisposable
 
     public string CurrentStatus =>
         _settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely
-            ? "无限保持唤醒"
+            ? "无限期保持激活"
             : (_settings.ResumeProtectionEnabled
                 ? $"遵循电源计划，恢复后 {_settings.ResumeProtectionDelaySeconds} 秒自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}"
                 : "遵循电源计划");
+
+    public void SetPolicyMode(PowerPolicyMode mode)
+    {
+        if (_settings.PolicyMode == mode)
+        {
+            return;
+        }
+
+        var updatedSettings = _settingsStore.Load();
+        updatedSettings.PolicyMode = mode;
+        UpdateSettings(updatedSettings);
+    }
 
     public void UpdateSettings(AppSettings updatedSettings)
     {
@@ -225,7 +237,7 @@ public sealed class PowerController : IDisposable
 
     private static string DescribeMode(PowerPolicyMode mode)
     {
-        return mode == PowerPolicyMode.KeepAwakeIndefinitely ? "无限保持唤醒" : "遵循电源计划";
+        return mode == PowerPolicyMode.KeepAwakeIndefinitely ? "无限期保持激活" : "遵循电源计划";
     }
 
     private static string DescribeResumeProtection(ResumeProtectionMode mode)
