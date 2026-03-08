@@ -247,6 +247,17 @@ public sealed class MainForm : Form
 
     private void UpdateStatus()
     {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(UpdateStatus));
+            return;
+        }
+
         var settings = _controller.CurrentSettings;
         _statusLabel.Text =
             $"当前状态：{_controller.CurrentStatus}{Environment.NewLine}" +
@@ -266,6 +277,11 @@ public sealed class MainForm : Form
 
     private void OnLogWritten(object? sender, string line)
     {
+        if (IsDisposed)
+        {
+            return;
+        }
+
         if (InvokeRequired)
         {
             BeginInvoke(new Action(() => OnLogWritten(sender, line)));

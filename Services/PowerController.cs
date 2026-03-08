@@ -6,9 +6,10 @@ namespace SleepSentinel.Services;
 
 public sealed class PowerController : IDisposable
 {
+    private const int PowerCfgTimeoutMilliseconds = 3000;
     private readonly SettingsStore _settingsStore;
     private readonly FileLogger _logger;
-    private readonly System.Windows.Forms.Timer _resumeTimer;
+    private readonly System.Threading.Timer _resumeTimer;
     private AppSettings _settings;
 
     public PowerController(SettingsStore settingsStore, FileLogger logger, AppSettings settings)
@@ -16,8 +17,11 @@ public sealed class PowerController : IDisposable
         _settingsStore = settingsStore;
         _logger = logger;
         _settings = settings;
-        _resumeTimer = new System.Windows.Forms.Timer();
-        _resumeTimer.Tick += ResumeTimerOnTick;
+        _resumeTimer = new System.Threading.Timer(
+            static state => ((PowerController)state!).OnResumeTimerElapsed(),
+            this,
+            Timeout.Infinite,
+            Timeout.Infinite);
 
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
         ApplyPolicy(_settings.PolicyMode);
@@ -106,7 +110,7 @@ public sealed class PowerController : IDisposable
     public void Dispose()
     {
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
-        _resumeTimer.Tick -= ResumeTimerOnTick;
+        _resumeTimer.Change(Timeout.Infinite, Timeout.Infinite);
         _resumeTimer.Dispose();
         NativeMethods.SetThreadExecutionState(ExecutionState.EsContinuous);
     }
@@ -198,7 +202,7 @@ public sealed class PowerController : IDisposable
 
     private void ArmResumeProtectionIfNeeded(WakeAnalysis analysis)
     {
-        _resumeTimer.Stop();
+        _resumeTimer.Change(Timeout.Infinite, Timeout.Infinite);
 
         if (_settings.PolicyMode != PowerPolicyMode.FollowPowerPlan)
         {
@@ -216,14 +220,14 @@ public sealed class PowerController : IDisposable
             return;
         }
 
-        _resumeTimer.Interval = Math.Max(3, _settings.ResumeProtectionDelaySeconds) * 1000;
-        _resumeTimer.Start();
-        _logger.Warn($"已启动恢复保护，将在 {_settings.ResumeProtectionDelaySeconds} 秒后自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
+        var delaySeconds = Math.Max(3, _settings.ResumeProtectionDelaySeconds);
+        _resumeTimer.Change(checked(delaySeconds * 1000), Timeout.Infinite);
+        _logger.Warn($"已启动恢复保护，将在 {delaySeconds} 秒后自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
     }
 
-    private void ResumeTimerOnTick(object? sender, EventArgs e)
+    private void OnResumeTimerElapsed()
     {
-        _resumeTimer.Stop();
+        _resumeTimer.Change(Timeout.Infinite, Timeout.Infinite);
 
         if (_settings.ResumeProtectionMode == ResumeProtectionMode.Hibernate)
         {
@@ -257,9 +261,22 @@ public sealed class PowerController : IDisposable
             process.StartInfo.RedirectStandardOutput = true;
             process.StartInfo.RedirectStandardError = true;
             process.Start();
-            var output = process.StandardOutput.ReadToEnd();
-            var error = process.StandardError.ReadToEnd();
-            process.WaitForExit(3000);
+
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            var errorTask = process.StandardError.ReadToEndAsync();
+
+            if (!process.WaitForExit(PowerCfgTimeoutMilliseconds))
+            {
+                TryKillProcess(process);
+                process.WaitForExit();
+                var timeoutMessage = $"powercfg {arguments} 超时（超过 {PowerCfgTimeoutMilliseconds / 1000} 秒）";
+                _logger.Warn(timeoutMessage);
+                return timeoutMessage;
+            }
+
+            Task.WaitAll(new Task[] { outputTask, errorTask }, 1000);
+            var output = outputTask.IsCompletedSuccessfully ? outputTask.Result : string.Empty;
+            var error = errorTask.IsCompletedSuccessfully ? errorTask.Result : string.Empty;
             if (process.ExitCode == 0)
             {
                 return string.IsNullOrWhiteSpace(output) ? string.Empty : output.Trim();
@@ -277,24 +294,29 @@ public sealed class PowerController : IDisposable
 
     private static WakeAnalysis AnalyzeWake(string diagnostics)
     {
-        var text = diagnostics.ToLowerInvariant();
+        var (lastWakeText, wakeTimersText) = SplitDiagnostics(diagnostics);
+        var lastWake = lastWakeText.ToLowerInvariant();
+        var wakeTimers = wakeTimersText.ToLowerInvariant();
 
-        if (ContainsAny(text, "power button", "电源按钮", "lid", "打开盖", "keyboard", "鼠标", "mouse"))
+        if (ContainsAny(lastWake, "power button", "电源按钮", "lid", "打开盖", "keyboard", "鼠标", "mouse"))
         {
             return new WakeAnalysis(true, "疑似人工唤醒（按键/开盖/鼠标键盘）");
         }
 
-        if (ContainsAny(text, "wake timer", "timer", "task scheduler", "updateorchestrator", "maintenance activator"))
-        {
-            return new WakeAnalysis(false, "疑似软件或定时器唤醒");
-        }
-
-        if (ContainsAny(text, "device", "usb", "network adapter", "wake on lan", "pci", "网卡"))
+        if (ContainsAny(lastWake, "device", "usb", "network adapter", "wake on lan", "pci", "网卡"))
         {
             return new WakeAnalysis(false, "疑似设备或网络唤醒");
         }
 
-        if (ContainsAny(text, "history count - 0", "wake history count - 0", "no active wake timers"))
+        if (ContainsAny(lastWake, "wake source: timer", "wake timer", "timer set by", "定时器")
+            || (ContainsAny(wakeTimers, "timer set by", "wake timer", "task scheduler", "updateorchestrator", "maintenance activator", "定时器")
+                && !ContainsAny(wakeTimers, "no active wake timers")))
+        {
+            return new WakeAnalysis(false, "疑似软件或定时器唤醒");
+        }
+
+        if (ContainsAny(lastWake, "history count - 0", "wake history count - 0")
+            || ContainsAny(wakeTimers, "no active wake timers"))
         {
             return new WakeAnalysis(false, "未识别到明确唤醒源，按非人工唤醒处理");
         }
@@ -302,9 +324,40 @@ public sealed class PowerController : IDisposable
         return new WakeAnalysis(false, "唤醒来源未知，按非人工唤醒处理");
     }
 
+    private static (string LastWake, string WakeTimers) SplitDiagnostics(string diagnostics)
+    {
+        const string lastWakeLabel = "lastwake:";
+        const string wakeTimersLabel = "waketimers:";
+
+        var wakeTimersIndex = diagnostics.IndexOf(wakeTimersLabel, StringComparison.OrdinalIgnoreCase);
+        var lastWake = diagnostics;
+        var wakeTimers = string.Empty;
+
+        if (wakeTimersIndex >= 0)
+        {
+            lastWake = diagnostics[..wakeTimersIndex];
+            wakeTimers = diagnostics[(wakeTimersIndex + wakeTimersLabel.Length)..];
+        }
+
+        lastWake = lastWake.Replace(lastWakeLabel, string.Empty, StringComparison.OrdinalIgnoreCase).Trim();
+        wakeTimers = wakeTimers.Trim();
+        return (lastWake, wakeTimers);
+    }
+
     private static bool ContainsAny(string source, params string[] values)
     {
         return values.Any(source.Contains);
+    }
+
+    private static void TryKillProcess(Process process)
+    {
+        try
+        {
+            process.Kill(true);
+        }
+        catch (InvalidOperationException)
+        {
+        }
     }
 
     private readonly record struct WakeAnalysis(bool IsLikelyManualWake, string Summary);

@@ -9,8 +9,10 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly NotifyIcon _notifyIcon;
     private readonly MainForm _mainForm;
     private readonly Icon _appIcon;
+    private readonly ToolStripMenuItem _keepAwakeMenu;
     private readonly ToolStripMenuItem _followPowerPlanMenuItem;
     private readonly ToolStripMenuItem _keepAwakeMenuItem;
+    private readonly EventHandler _stateChangedHandler;
 
     public TrayApplicationContext(PowerController controller, FileLogger logger, SettingsStore settingsStore, Icon appIcon)
     {
@@ -31,19 +33,22 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add("打开面板", null, (_, _) => ShowMainForm());
         menu.Items.Add(new ToolStripSeparator());
 
-        _followPowerPlanMenuItem = new ToolStripMenuItem("切换为遵循电源计划")
+        _keepAwakeMenu = new ToolStripMenuItem("保持唤醒");
+
+        _followPowerPlanMenuItem = new ToolStripMenuItem("遵循电源计划")
         {
             CheckOnClick = false
         };
         _followPowerPlanMenuItem.Click += (_, _) => _controller.SetPolicyMode(Models.PowerPolicyMode.FollowPowerPlan);
-        menu.Items.Add(_followPowerPlanMenuItem);
+        _keepAwakeMenu.DropDownItems.Add(_followPowerPlanMenuItem);
 
-        _keepAwakeMenuItem = new ToolStripMenuItem("切换为无限期保持激活")
+        _keepAwakeMenuItem = new ToolStripMenuItem("无限保持唤醒（类似 PowerToys Awake）")
         {
             CheckOnClick = false
         };
         _keepAwakeMenuItem.Click += (_, _) => _controller.SetPolicyMode(Models.PowerPolicyMode.KeepAwakeIndefinitely);
-        menu.Items.Add(_keepAwakeMenuItem);
+        _keepAwakeMenu.DropDownItems.Add(_keepAwakeMenuItem);
+        menu.Items.Add(_keepAwakeMenu);
 
         menu.Items.Add("立即睡眠", null, (_, _) => _controller.SleepNow());
         menu.Items.Add("立即休眠", null, (_, _) => _controller.HibernateNow());
@@ -59,7 +64,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         };
 
         _notifyIcon.DoubleClick += (_, _) => ShowMainForm();
-        _controller.StateChanged += (_, _) => RefreshTrayText();
+        _stateChangedHandler = (_, _) => RefreshTrayTextOnUiThread();
+        _controller.StateChanged += _stateChangedHandler;
         RefreshTrayText();
 
         if (!_controller.CurrentSettings.StartMinimized)
@@ -70,6 +76,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        _controller.StateChanged -= _stateChangedHandler;
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _mainForm.Dispose();
@@ -91,7 +98,24 @@ public sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.Text = text.Length > 63 ? text[..63] : text;
         _notifyIcon.BalloonTipTitle = "SleepSentinel";
         _notifyIcon.BalloonTipText = _controller.CurrentStatus;
+        _keepAwakeMenu.Text = $"保持唤醒: {_controller.CurrentStatus}";
         _followPowerPlanMenuItem.Checked = _controller.CurrentSettings.PolicyMode == Models.PowerPolicyMode.FollowPowerPlan;
         _keepAwakeMenuItem.Checked = _controller.CurrentSettings.PolicyMode == Models.PowerPolicyMode.KeepAwakeIndefinitely;
+    }
+
+    private void RefreshTrayTextOnUiThread()
+    {
+        if (_mainForm.IsDisposed)
+        {
+            return;
+        }
+
+        if (_mainForm.IsHandleCreated && _mainForm.InvokeRequired)
+        {
+            _mainForm.BeginInvoke(new Action(RefreshTrayTextOnUiThread));
+            return;
+        }
+
+        RefreshTrayText();
     }
 }
