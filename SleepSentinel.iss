@@ -1,5 +1,5 @@
 #define MyAppName "SleepSentinel"
-#define MyAppVersion "1.0.5"
+#define MyAppVersion "1.0.6"
 #define MyAppPublisher "Zhang"
 #define MyAppExeName "SleepSentinel.exe"
 
@@ -42,16 +42,12 @@ Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: no
 function IsSleepSentinelRunning(): Boolean;
 var
   ResultCode: Integer;
-  OutputPath: string;
-  OutputText: string;
 begin
-  OutputPath := ExpandConstant('{tmp}\SleepSentinel-tasklist.txt');
-  DeleteFile(OutputPath);
   Result := False;
 
   if not Exec(
     ExpandConstant('{cmd}'),
-    '/C tasklist /FI "IMAGENAME eq {#MyAppExeName}" /NH > "' + OutputPath + '"',
+    '/C tasklist /FI "IMAGENAME eq {#MyAppExeName}" /NH | find /I "{#MyAppExeName}" >nul',
     '',
     SW_HIDE,
     ewWaitUntilTerminated,
@@ -61,12 +57,7 @@ begin
     Exit;
   end;
 
-  if LoadStringFromFile(OutputPath, OutputText) then
-  begin
-    Result := Pos('{#MyAppExeName}', OutputText) > 0;
-  end;
-
-  DeleteFile(OutputPath);
+  Result := ResultCode = 0;
 end;
 
 function CloseSleepSentinelProcess(): Boolean;
