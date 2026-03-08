@@ -19,6 +19,8 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=Assets\AppIcon.ico
+CloseApplications=no
+RestartApplications=no
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "compiler:Default.isl"
@@ -35,3 +37,86 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function IsSleepSentinelRunning(): Boolean;
+var
+  ResultCode: Integer;
+  OutputPath: string;
+  OutputText: string;
+begin
+  OutputPath := ExpandConstant('{tmp}\SleepSentinel-tasklist.txt');
+  DeleteFile(OutputPath);
+  Result := False;
+
+  if not Exec(
+    ExpandConstant('{cmd}'),
+    '/C tasklist /FI "IMAGENAME eq {#MyAppExeName}" /NH > "' + OutputPath + '"',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode) then
+  begin
+    Log('无法检查 SleepSentinel 进程状态。');
+    Exit;
+  end;
+
+  if LoadStringFromFile(OutputPath, OutputText) then
+  begin
+    Result := Pos('{#MyAppExeName}', OutputText) > 0;
+  end;
+
+  DeleteFile(OutputPath);
+end;
+
+function CloseSleepSentinelProcess(): Boolean;
+var
+  ResultCode: Integer;
+  Attempt: Integer;
+begin
+  Result := True;
+
+  if not IsSleepSentinelRunning() then
+  begin
+    Log('安装前未检测到正在运行的 SleepSentinel。');
+    Exit;
+  end;
+
+  Log('安装前尝试关闭正在运行的 SleepSentinel。');
+  if not Exec(
+    ExpandConstant('{cmd}'),
+    '/C taskkill /IM "{#MyAppExeName}" /T /F >nul 2>&1',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode) then
+  begin
+    Log('启动 taskkill 失败。');
+    Result := False;
+    Exit;
+  end;
+
+  for Attempt := 1 to 10 do
+  begin
+    if not IsSleepSentinelRunning() then
+    begin
+      Log('已成功关闭 SleepSentinel。');
+      Exit;
+    end;
+
+    Sleep(500);
+  end;
+
+  Log('SleepSentinel 仍在运行，安装无法继续覆盖旧文件。');
+  Result := False;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+
+  if not CloseSleepSentinelProcess() then
+  begin
+    Result := '安装前无法关闭正在运行的 SleepSentinel，请先从托盘退出后重试。';
+  end;
+end;
