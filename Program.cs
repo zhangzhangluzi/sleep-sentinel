@@ -20,8 +20,9 @@ internal static class Program
         var settingsStore = new SettingsStore();
         var logger = new FileLogger(settingsStore.BaseDirectory);
         var settings = settingsStore.Load();
+        using var appIcon = AppIconFactory.CreateAppIcon();
         using var controller = new PowerController(settingsStore, logger, settings);
-        using var trayContext = new TrayApplicationContext(controller, logger, settingsStore);
+        using var trayContext = new TrayApplicationContext(controller, logger, settingsStore, appIcon);
 
         Application.Run(trayContext);
     }

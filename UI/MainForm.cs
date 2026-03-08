@@ -20,19 +20,22 @@ public sealed class MainForm : Form
     private readonly Label _statusLabel;
     private readonly TextBox _logTextBox;
     private readonly EventHandler _stateChangedHandler;
+    private readonly Icon _appIcon;
 
-    public MainForm(PowerController controller, FileLogger logger, SettingsStore settingsStore)
+    public MainForm(PowerController controller, FileLogger logger, SettingsStore settingsStore, Icon appIcon)
     {
         _controller = controller;
         _logger = logger;
         _settingsStore = settingsStore;
         _diagnosticReportService = new DiagnosticReportService(settingsStore, logger, controller);
+        _appIcon = (Icon)appIcon.Clone();
 
         Text = "SleepSentinel";
         Width = 860;
         Height = 640;
         MinimumSize = new Size(760, 540);
         StartPosition = FormStartPosition.CenterScreen;
+        Icon = _appIcon;
 
         var root = new TableLayoutPanel
         {
@@ -202,6 +205,7 @@ public sealed class MainForm : Form
         {
             _logger.LogWritten -= OnLogWritten;
             _controller.StateChanged -= _stateChangedHandler;
+            _appIcon.Dispose();
         }
 
         base.Dispose(disposing);

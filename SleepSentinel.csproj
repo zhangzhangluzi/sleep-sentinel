@@ -11,5 +11,14 @@
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AssemblyTitle>SleepSentinel</AssemblyTitle>
+    <Product>SleepSentinel</Product>
+    <Description>Windows tray utility that protects sleep and hibernate behavior from unwanted wake-ups.</Description>
+    <Company>Zhang</Company>
+    <Authors>Zhang</Authors>
+    <AssemblyVersion>1.0.3.0</AssemblyVersion>
+    <FileVersion>1.0.3.0</FileVersion>
+    <Version>1.0.3</Version>
+    <InformationalVersion>1.0.3</InformationalVersion>
   </PropertyGroup>
 </Project>

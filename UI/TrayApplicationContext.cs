@@ -8,13 +8,15 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly FileLogger _logger;
     private readonly NotifyIcon _notifyIcon;
     private readonly MainForm _mainForm;
+    private readonly Icon _appIcon;
 
-    public TrayApplicationContext(PowerController controller, FileLogger logger, SettingsStore settingsStore)
+    public TrayApplicationContext(PowerController controller, FileLogger logger, SettingsStore settingsStore, Icon appIcon)
     {
         _controller = controller;
         _logger = logger;
+        _appIcon = (Icon)appIcon.Clone();
 
-        _mainForm = new MainForm(controller, logger, settingsStore);
+        _mainForm = new MainForm(controller, logger, settingsStore, _appIcon);
         _mainForm.FormClosed += (_, _) =>
         {
             if (_mainForm.Visible)
@@ -32,7 +34,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         _notifyIcon = new NotifyIcon
         {
-            Icon = SystemIcons.Shield,
+            Icon = _appIcon,
             Visible = true,
             Text = "SleepSentinel",
             ContextMenuStrip = menu
@@ -53,6 +55,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _mainForm.Dispose();
+        _appIcon.Dispose();
         base.ExitThreadCore();
     }
 
