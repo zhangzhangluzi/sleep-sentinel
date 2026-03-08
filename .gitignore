@@ -1,0 +1,8 @@
+bin/
+obj/
+installer/
+.vs/
+*.user
+*.suo
+*.pdb
+*.cache
