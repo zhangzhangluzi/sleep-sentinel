@@ -32,15 +32,32 @@ jobs:
           if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
           Compress-Archive -Path "$publishDir\*" -DestinationPath $zipPath
 
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" ".\SleepSentinel.iss"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: SleepSentinel-win-x64
           path: SleepSentinel-win-x64.zip
 
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SleepSentinel-Setup-win-x64
+          path: installer/SleepSentinel-Setup-win-x64.exe
+
       - name: Publish GitHub release asset
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: SleepSentinel-win-x64.zip
+          files: |
+            bin/Release/net8.0-windows/win-x64/publish/SleepSentinel.exe
+            SleepSentinel-win-x64.zip
+            installer/SleepSentinel-Setup-win-x64.exe
           generate_release_notes: true

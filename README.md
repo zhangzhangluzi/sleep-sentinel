@@ -61,6 +61,11 @@ bin\Release\net8.0-windows\win-x64\publish\
 
 如果已安装 Inno Setup，打开 [SleepSentinel.iss](/mnt/c/Users/zhang/projects/SleepSentinel/SleepSentinel.iss) 编译即可生成安装程序。
 
+GitHub Release 也会自动附带：
+
+- `SleepSentinel-Setup-win-x64.exe`
+- 正常安装、开始菜单快捷方式、卸载入口
+
 ## GitHub 下载
 
 仓库接入了 GitHub Actions：
