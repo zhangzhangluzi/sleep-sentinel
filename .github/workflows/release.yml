@@ -8,6 +8,9 @@ on:
       - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -54,10 +57,22 @@ jobs:
 
       - name: Publish GitHub release asset
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            bin/Release/net8.0-windows/win-x64/publish/SleepSentinel.exe
-            SleepSentinel-win-x64.zip
-            installer/SleepSentinel-Setup-win-x64.exe
-          generate_release_notes: true
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $repo = "${{ github.repository }}"
+          $files = @(
+            "bin/Release/net8.0-windows/win-x64/publish/SleepSentinel.exe",
+            "SleepSentinel-win-x64.zip",
+            "installer/SleepSentinel-Setup-win-x64.exe"
+          )
+
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $files --clobber --repo $repo
+          }
+          else {
+            gh release create $tag $files --generate-notes --repo $repo
+          }
