@@ -143,6 +143,14 @@ public sealed class MainForm : Form
             _logger.Warn(_controller.CollectWakeDiagnostics());
             LoadLogs();
         };
+        var blockSoftwareWakeButton = new Button { Text = "禁止软件唤醒", AutoSize = true };
+        blockSoftwareWakeButton.Click += (_, _) =>
+        {
+            _controller.BlockSoftwareWake();
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
         var reapplyWakeTimerButton = new Button { Text = "重新应用唤醒定时器策略", AutoSize = true };
         reapplyWakeTimerButton.Click += (_, _) =>
         {
@@ -158,6 +166,7 @@ public sealed class MainForm : Form
         actionsFlow.Controls.Add(hibernateButton);
         actionsFlow.Controls.Add(refreshLogButton);
         actionsFlow.Controls.Add(diagnosticsButton);
+        actionsFlow.Controls.Add(blockSoftwareWakeButton);
         actionsFlow.Controls.Add(reapplyWakeTimerButton);
         actionsFlow.Controls.Add(exportReportButton);
 

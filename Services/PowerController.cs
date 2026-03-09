@@ -209,6 +209,22 @@ public sealed class PowerController : IDisposable
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public void BlockSoftwareWake()
+    {
+        if (_settings.DisableWakeTimers)
+        {
+            _logger.Info("软件/定时器唤醒拦截已启用，正在重新应用当前电源计划策略。");
+            ApplyWakeTimerPolicy();
+            StateChanged?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        var updatedSettings = _settingsStore.Load();
+        updatedSettings.DisableWakeTimers = true;
+        _logger.Info("已通过快捷按钮启用软件/定时器唤醒拦截。");
+        UpdateSettings(updatedSettings);
+    }
+
     public void Dispose()
     {
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
