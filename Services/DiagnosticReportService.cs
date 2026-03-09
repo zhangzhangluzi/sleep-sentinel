@@ -38,6 +38,7 @@ public sealed class DiagnosticReportService
         builder.AppendLine($"ResumeProtectionDelaySeconds: {settings.ResumeProtectionDelaySeconds}");
         builder.AppendLine($"DisableWakeTimers: {settings.DisableWakeTimers}");
         builder.AppendLine($"WakeTimerPolicySummary: {settings.WakeTimerPolicySummary}");
+        builder.AppendLine($"ProtectionRuleSummary: {_controller.CurrentProtectionRuleSummary}");
         builder.AppendLine($"StartMinimized: {settings.StartMinimized}");
         builder.AppendLine($"StartWithWindows: {settings.StartWithWindows}");
         builder.AppendLine($"LastSuspendUtc: {settings.LastSuspendUtc}");

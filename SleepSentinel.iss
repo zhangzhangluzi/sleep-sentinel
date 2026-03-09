@@ -1,5 +1,5 @@
 #define MyAppName "SleepSentinel"
-#define MyAppVersion "1.0.10"
+#define MyAppVersion "1.0.11"
 #define MyAppPublisher "Zhang"
 #define MyAppExeName "SleepSentinel.exe"
 

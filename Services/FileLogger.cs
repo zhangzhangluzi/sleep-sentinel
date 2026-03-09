@@ -23,13 +23,53 @@ public sealed class FileLogger
 
     public IReadOnlyList<string> ReadRecent(int maxLines = 200)
     {
-        var path = GetLogPath(DateTime.Now);
-        if (!File.Exists(path))
+        if (maxLines <= 0)
         {
             return Array.Empty<string>();
         }
 
-        return File.ReadAllLines(path).TakeLast(maxLines).ToArray();
+        try
+        {
+            Directory.CreateDirectory(_logDirectory);
+
+            var remainingLines = maxLines;
+            var collectedChunks = new List<string[]>();
+
+            foreach (var path in Directory.EnumerateFiles(_logDirectory, "*.log")
+                         .OrderByDescending(Path.GetFileName)
+                         .Take(7))
+            {
+                if (remainingLines <= 0)
+                {
+                    break;
+                }
+
+                var lines = File.ReadAllLines(path).TakeLast(remainingLines).ToArray();
+                if (lines.Length == 0)
+                {
+                    continue;
+                }
+
+                collectedChunks.Add(lines);
+                remainingLines -= lines.Length;
+            }
+
+            if (collectedChunks.Count == 0)
+            {
+                return Array.Empty<string>();
+            }
+
+            collectedChunks.Reverse();
+            return collectedChunks.SelectMany(static chunk => chunk).ToArray();
+        }
+        catch (IOException)
+        {
+            return Array.Empty<string>();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Array.Empty<string>();
+        }
     }
 
     private void Write(string level, string message)

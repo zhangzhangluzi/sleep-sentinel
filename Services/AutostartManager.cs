@@ -10,7 +10,11 @@ public static class AutostartManager
     public static bool IsEnabled()
     {
         using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, false);
-        return key?.GetValue(ValueName) is string value && !string.IsNullOrWhiteSpace(value);
+        var configuredCommand = key?.GetValue(ValueName) as string;
+        return string.Equals(
+            NormalizeExecutablePath(configuredCommand),
+            NormalizeExecutablePath(BuildCommand(Application.ExecutablePath)),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     public static void SetEnabled(bool enabled)
@@ -19,11 +23,48 @@ public static class AutostartManager
 
         if (enabled)
         {
-            var exePath = Application.ExecutablePath;
-            key?.SetValue(ValueName, $"\"{exePath}\"");
+            key?.SetValue(ValueName, BuildCommand(Application.ExecutablePath));
             return;
         }
 
         key?.DeleteValue(ValueName, false);
+    }
+
+    private static string BuildCommand(string executablePath)
+    {
+        return $"\"{executablePath}\"";
+    }
+
+    private static string NormalizeExecutablePath(string? command)
+    {
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = command.Trim();
+        string executablePath;
+
+        if (trimmed.StartsWith('"'))
+        {
+            var closingQuoteIndex = trimmed.IndexOf('"', 1);
+            executablePath = closingQuoteIndex > 1 ? trimmed[1..closingQuoteIndex] : trimmed.Trim('"');
+        }
+        else
+        {
+            var firstSpaceIndex = trimmed.IndexOf(' ');
+            executablePath = firstSpaceIndex > 0 ? trimmed[..firstSpaceIndex] : trimmed;
+        }
+
+        executablePath = Environment.ExpandEnvironmentVariables(executablePath);
+
+        try
+        {
+            return Path.GetFullPath(executablePath);
+        }
+        catch (Exception)
+        {
+            return executablePath;
+        }
     }
 }

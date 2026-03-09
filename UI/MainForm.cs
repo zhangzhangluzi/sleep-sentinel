@@ -90,7 +90,7 @@ public sealed class MainForm : Form
         _onlyUnattendedWakeCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "仅对明确识别为软件/定时器/设备唤醒执行保护；人工或来源不明时跳过"
+            Text = "仅在人工行为时跳过；人工包括键盘、鼠标、开盖、解锁、控制台/远程接管、登录"
         };
 
         _disableWakeTimersCheckbox = new CheckBox
@@ -199,6 +199,16 @@ public sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
+    protected override void OnResize(EventArgs e)
+    {
+        if (WindowState == FormWindowState.Minimized && Visible)
+        {
+            Hide();
+        }
+
+        base.OnResize(e);
+    }
+
     protected override void Dispose(bool disposing)
     {
         if (disposing)
@@ -261,6 +271,7 @@ public sealed class MainForm : Form
         var settings = _controller.CurrentSettings;
         _statusLabel.Text =
             $"当前状态：{_controller.CurrentStatus}{Environment.NewLine}" +
+            $"保护规则：{_controller.CurrentProtectionRuleSummary}{Environment.NewLine}" +
             $"最近一次唤醒判定：{settings.LastWakeSummary}{Environment.NewLine}" +
             $"唤醒定时器策略：{settings.WakeTimerPolicySummary}{Environment.NewLine}" +
             $"配置文件：{_settingsStore.SettingsPath}{Environment.NewLine}" +

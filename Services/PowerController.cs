@@ -7,6 +7,7 @@ namespace SleepSentinel.Services;
 
 public sealed class PowerController : IDisposable
 {
+    private static readonly TimeSpan ManualResumeSignalWindow = TimeSpan.FromSeconds(20);
     private const int PowerCfgTimeoutMilliseconds = 3000;
     private static readonly string[] ManualWakeIndicators =
     [
@@ -83,8 +84,12 @@ public sealed class PowerController : IDisposable
     ];
     private readonly SettingsStore _settingsStore;
     private readonly FileLogger _logger;
+    private readonly object _manualSignalSync = new();
     private readonly object _resumeProtectionSync = new();
+    private readonly PowerNotificationWindow? _powerNotificationWindow;
     private readonly System.Threading.Timer _resumeTimer;
+    private DateTimeOffset? _lastManualResumeSignalUtc;
+    private string _lastManualResumeSignalReason = "人工操作";
     private uint? _resumeProtectionArmedAtTick;
     private AppSettings _settings;
 
@@ -99,7 +104,18 @@ public sealed class PowerController : IDisposable
             Timeout.Infinite,
             Timeout.Infinite);
 
+        try
+        {
+            _powerNotificationWindow = new PowerNotificationWindow();
+            _powerNotificationWindow.LidStateChanged += OnLidStateChanged;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"注册开盖状态监听失败，将退回到键鼠/解锁判断：{ex.Message}");
+        }
+
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        SystemEvents.SessionSwitch += OnSessionSwitch;
         ApplyPolicy(_settings.PolicyMode);
         if (_settings.DisableWakeTimers)
         {
@@ -123,6 +139,8 @@ public sealed class PowerController : IDisposable
             : (_settings.ResumeProtectionEnabled
                 ? $"遵循电源计划，恢复后 {_settings.ResumeProtectionDelaySeconds} 秒自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}"
                 : "遵循电源计划");
+
+    public string CurrentProtectionRuleSummary => BuildProtectionRuleSummary();
 
     public void SetPolicyMode(PowerPolicyMode mode)
     {
@@ -194,6 +212,12 @@ public sealed class PowerController : IDisposable
     public void Dispose()
     {
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        SystemEvents.SessionSwitch -= OnSessionSwitch;
+        if (_powerNotificationWindow is not null)
+        {
+            _powerNotificationWindow.LidStateChanged -= OnLidStateChanged;
+            _powerNotificationWindow.Dispose();
+        }
         CancelPendingResumeProtection();
         _resumeTimer.Dispose();
         NativeMethods.SetThreadExecutionState(ExecutionState.EsContinuous);
@@ -201,14 +225,22 @@ public sealed class PowerController : IDisposable
 
     private void ApplyPolicy(PowerPolicyMode mode)
     {
+        var executionState = mode == PowerPolicyMode.KeepAwakeIndefinitely
+            ? ExecutionState.EsContinuous | ExecutionState.EsSystemRequired
+            : ExecutionState.EsContinuous;
+
+        if (NativeMethods.SetThreadExecutionState(executionState) == 0)
+        {
+            _logger.Error($"设置执行状态失败：{DescribeMode(mode)}。");
+            return;
+        }
+
         if (mode == PowerPolicyMode.KeepAwakeIndefinitely)
         {
-            NativeMethods.SetThreadExecutionState(ExecutionState.EsContinuous | ExecutionState.EsSystemRequired);
             _logger.Info("已启用无限保持唤醒。");
         }
         else
         {
-            NativeMethods.SetThreadExecutionState(ExecutionState.EsContinuous);
             _logger.Info("已切换为遵循电源计划。");
         }
     }
@@ -262,6 +294,7 @@ public sealed class PowerController : IDisposable
         {
             case PowerModes.Suspend:
                 CancelPendingResumeProtection();
+                ClearManualResumeSignals();
                 _settings.LastSuspendUtc = DateTimeOffset.UtcNow;
                 _settingsStore.Save(_settings);
                 _logger.Warn("系统即将进入挂起/休眠。");
@@ -272,6 +305,10 @@ public sealed class PowerController : IDisposable
                 _settings.LastResumeUtc = DateTimeOffset.UtcNow;
                 var diagnostics = CollectWakeDiagnostics();
                 var analysis = AnalyzeWake(diagnostics);
+                if (TryGetRecentManualResumeSignal(out var manualSignalReason) && analysis.Kind != WakeKind.Manual)
+                {
+                    analysis = new WakeAnalysis(WakeKind.Manual, $"检测到人工行为（{manualSignalReason}）");
+                }
                 _settings.LastWakeSummary = analysis.Summary;
                 _settingsStore.Save(_settings);
                 _logger.Warn($"系统已从挂起/休眠恢复。判定：{analysis.Summary}{Environment.NewLine}{diagnostics}");
@@ -282,6 +319,40 @@ public sealed class PowerController : IDisposable
             case PowerModes.StatusChange:
                 StateChanged?.Invoke(this, EventArgs.Empty);
                 break;
+        }
+    }
+
+    private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+    {
+        if (e.Reason is not (SessionSwitchReason.SessionUnlock
+            or SessionSwitchReason.ConsoleConnect
+            or SessionSwitchReason.RemoteConnect
+            or SessionSwitchReason.SessionLogon))
+        {
+            return;
+        }
+
+        var reason = DescribeSessionSwitchReason(e.Reason);
+        RecordManualResumeSignal(reason);
+
+        if (CancelPendingResumeProtection($"检测到{reason}，已取消待执行的自动回睡。"))
+        {
+            StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    private void OnLidStateChanged(object? sender, bool isOpen)
+    {
+        if (!isOpen)
+        {
+            return;
+        }
+
+        RecordManualResumeSignal("开盖");
+
+        if (CancelPendingResumeProtection("检测到开盖操作，已取消待执行的自动回睡。"))
+        {
+            StateChanged?.Invoke(this, EventArgs.Empty);
         }
     }
 
@@ -299,13 +370,19 @@ public sealed class PowerController : IDisposable
             return;
         }
 
-        if (_settings.ResumeProtectionOnlyForUnattendedWake && analysis.Kind != WakeKind.Unattended)
+        if (_settings.ResumeProtectionOnlyForUnattendedWake)
         {
-            var reason = analysis.Kind == WakeKind.Manual
-                ? "本次恢复被判定为疑似人工唤醒"
-                : "本次恢复来源不明确，出于安全考虑";
-            _logger.Info($"{reason}，已跳过自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
-            return;
+            if (analysis.Kind == WakeKind.Manual)
+            {
+                _logger.Info($"本次恢复被判定为人工唤醒，已跳过自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
+                return;
+            }
+
+            if (TryGetRecentManualResumeSignal(out var manualSignalReason))
+            {
+                _logger.Info($"检测到{manualSignalReason}，已跳过自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
+                return;
+            }
         }
 
         var delaySeconds = Math.Max(3, _settings.ResumeProtectionDelaySeconds);
@@ -357,6 +434,29 @@ public sealed class PowerController : IDisposable
     private static string DescribeResumeProtection(ResumeProtectionMode mode)
     {
         return mode == ResumeProtectionMode.Hibernate ? "休眠" : "睡眠";
+    }
+
+    private string BuildProtectionRuleSummary()
+    {
+        if (_settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely)
+        {
+            return "当前处于无限保持唤醒模式，不执行恢复后自动回睡。";
+        }
+
+        if (!_settings.ResumeProtectionEnabled)
+        {
+            return "恢复保护已关闭，系统恢复后不会自动重新睡眠/休眠。";
+        }
+
+        var resumeAction = DescribeResumeProtection(_settings.ResumeProtectionMode);
+        var delaySeconds = Math.Max(3, _settings.ResumeProtectionDelaySeconds);
+
+        if (_settings.ResumeProtectionOnlyForUnattendedWake)
+        {
+            return $"人工行为（键盘、鼠标、开盖、解锁、控制台/远程接管、登录）恢复后跳过自动回睡；其他恢复（软件、定时器、设备、来源不明）会在 {delaySeconds} 秒后自动{resumeAction}。";
+        }
+
+        return $"不区分人工或非人工，系统每次恢复后都会在 {delaySeconds} 秒后自动{resumeAction}。";
     }
 
     private string RunPowerCfg(string arguments)
@@ -461,7 +561,48 @@ public sealed class PowerController : IDisposable
         return values.Any(source.Contains);
     }
 
-    private void CancelPendingResumeProtection(string? reason = null)
+    private void RecordManualResumeSignal(string reason)
+    {
+        lock (_manualSignalSync)
+        {
+            _lastManualResumeSignalUtc = DateTimeOffset.UtcNow;
+            _lastManualResumeSignalReason = reason;
+        }
+    }
+
+    private void ClearManualResumeSignals()
+    {
+        lock (_manualSignalSync)
+        {
+            _lastManualResumeSignalUtc = null;
+            _lastManualResumeSignalReason = "人工操作";
+        }
+    }
+
+    private bool TryGetRecentManualResumeSignal(out string reason)
+    {
+        lock (_manualSignalSync)
+        {
+            if (_lastManualResumeSignalUtc is not { } lastSignalUtc)
+            {
+                reason = string.Empty;
+                return false;
+            }
+
+            if (DateTimeOffset.UtcNow - lastSignalUtc > ManualResumeSignalWindow)
+            {
+                _lastManualResumeSignalUtc = null;
+                _lastManualResumeSignalReason = "人工操作";
+                reason = string.Empty;
+                return false;
+            }
+
+            reason = _lastManualResumeSignalReason;
+            return true;
+        }
+    }
+
+    private bool CancelPendingResumeProtection(string? reason = null)
     {
         var canceled = false;
 
@@ -480,6 +621,8 @@ public sealed class PowerController : IDisposable
         {
             _logger.Info(reason);
         }
+
+        return canceled;
     }
 
     private static bool HasUserInteractionSince(uint armedAtTick)
@@ -501,7 +644,30 @@ public sealed class PowerController : IDisposable
     private void RequestSuspend(PowerState powerState, string logMessage)
     {
         _logger.Warn(logMessage);
-        Application.SetSuspendState(powerState, false, false);
+        if (Application.SetSuspendState(powerState, false, false))
+        {
+            return;
+        }
+
+        _logger.Error($"请求{DescribePowerState(powerState)}失败，系统拒绝执行。");
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static string DescribePowerState(PowerState powerState)
+    {
+        return powerState == PowerState.Hibernate ? "休眠" : "睡眠";
+    }
+
+    private static string DescribeSessionSwitchReason(SessionSwitchReason reason)
+    {
+        return reason switch
+        {
+            SessionSwitchReason.SessionUnlock => "会话解锁",
+            SessionSwitchReason.ConsoleConnect => "控制台接管",
+            SessionSwitchReason.RemoteConnect => "远程接管",
+            SessionSwitchReason.SessionLogon => "用户登录",
+            _ => reason.ToString()
+        };
     }
 
     private static void TryKillProcess(Process process)
