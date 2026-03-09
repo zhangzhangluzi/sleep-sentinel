@@ -27,6 +27,7 @@ public sealed class TrayApplicationContext : ApplicationContext
                 _mainForm.Hide();
             }
         };
+        _ = _mainForm.Handle;
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开面板", null, (_, _) => ShowMainForm());
@@ -105,7 +106,12 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
-        if (_mainForm.IsHandleCreated && _mainForm.InvokeRequired)
+        if (!_mainForm.IsHandleCreated)
+        {
+            return;
+        }
+
+        if (_mainForm.InvokeRequired)
         {
             _mainForm.BeginInvoke(new Action(RefreshTrayTextOnUiThread));
             return;

@@ -90,7 +90,7 @@ public sealed class MainForm : Form
         _onlyUnattendedWakeCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "仅对疑似软件/定时器/设备唤醒执行保护，疑似人工唤醒则跳过"
+            Text = "仅对明确识别为软件/定时器/设备唤醒执行保护；人工或来源不明时跳过"
         };
 
         _disableWakeTimersCheckbox = new CheckBox

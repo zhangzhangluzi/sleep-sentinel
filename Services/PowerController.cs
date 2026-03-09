@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using SleepSentinel.Models;
 
@@ -7,9 +8,84 @@ namespace SleepSentinel.Services;
 public sealed class PowerController : IDisposable
 {
     private const int PowerCfgTimeoutMilliseconds = 3000;
+    private static readonly string[] ManualWakeIndicators =
+    [
+        "power button",
+        "power switch",
+        "电源按钮",
+        "电源键",
+        "电源开关",
+        "sleep button",
+        "睡眠按钮",
+        "lid",
+        "开盖",
+        "打开盖",
+        "盖子",
+        "keyboard",
+        "键盘",
+        "mouse",
+        "鼠标",
+        "touchpad",
+        "触控板",
+        "指纹"
+    ];
+    private static readonly string[] DeviceWakeIndicators =
+    [
+        "device",
+        "usb",
+        "network adapter",
+        "wake on lan",
+        "pci",
+        "蓝牙",
+        "bluetooth",
+        "网卡"
+    ];
+    private static readonly string[] TimerWakeIndicators =
+    [
+        "wake source: timer",
+        "wake timer",
+        "timer set by",
+        "task scheduler",
+        "windows update",
+        "updateorchestrator",
+        "maintenance activator",
+        "定时器",
+        "计划任务",
+        "更新协调器",
+        "维护激活器"
+    ];
+    private static readonly string[] NoWakeHistoryIndicators =
+    [
+        "history count - 0",
+        "wake history count - 0",
+        "历史计数 - 0",
+        "唤醒历史计数 - 0"
+    ];
+    private static readonly string[] NoWakeSourceIndicators =
+    [
+        "wake source count - 0",
+        "唤醒源计数 - 0"
+    ];
+    private static readonly string[] NoActiveWakeTimerIndicators =
+    [
+        "no active wake timers",
+        "没有活动的唤醒定时器",
+        "当前没有活动的唤醒定时器"
+    ];
+    private static readonly string[] DiagnosticsUnavailableIndicators =
+    [
+        "requires administrator privileges",
+        "must be run from an elevated command prompt",
+        "administrator privileges",
+        "elevated command prompt",
+        "此命令需要管理员权限",
+        "必须从提升的命令提示符中执行"
+    ];
     private readonly SettingsStore _settingsStore;
     private readonly FileLogger _logger;
+    private readonly object _resumeProtectionSync = new();
     private readonly System.Threading.Timer _resumeTimer;
+    private uint? _resumeProtectionArmedAtTick;
     private AppSettings _settings;
 
     public PowerController(SettingsStore settingsStore, FileLogger logger, AppSettings settings)
@@ -25,7 +101,14 @@ public sealed class PowerController : IDisposable
 
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
         ApplyPolicy(_settings.PolicyMode);
-        RefreshWakeTimerPolicySummary();
+        if (_settings.DisableWakeTimers)
+        {
+            ApplyWakeTimerPolicy();
+        }
+        else
+        {
+            RefreshWakeTimerPolicySummary();
+        }
         EnsureAutostartMatchesSettings();
         _logger.Info($"应用启动，当前模式：{DescribeMode(_settings.PolicyMode)}。");
     }
@@ -55,6 +138,7 @@ public sealed class PowerController : IDisposable
 
     public void UpdateSettings(AppSettings updatedSettings)
     {
+        CancelPendingResumeProtection();
         _settings = updatedSettings;
         _settingsStore.Save(_settings);
         ApplyPolicy(_settings.PolicyMode);
@@ -73,14 +157,14 @@ public sealed class PowerController : IDisposable
 
     public void SleepNow()
     {
-        _logger.Warn("用户手动请求立即睡眠。");
-        Application.SetSuspendState(PowerState.Suspend, false, false);
+        CancelPendingResumeProtection("用户手动操作，已取消待执行的自动回睡。");
+        RequestSuspend(PowerState.Suspend, "用户手动请求立即睡眠。");
     }
 
     public void HibernateNow()
     {
-        _logger.Warn("用户手动请求立即休眠。");
-        Application.SetSuspendState(PowerState.Hibernate, false, false);
+        CancelPendingResumeProtection("用户手动操作，已取消待执行的自动回睡。");
+        RequestSuspend(PowerState.Hibernate, "用户手动请求立即休眠。");
     }
 
     public string CollectWakeDiagnostics()
@@ -110,7 +194,7 @@ public sealed class PowerController : IDisposable
     public void Dispose()
     {
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
-        _resumeTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        CancelPendingResumeProtection();
         _resumeTimer.Dispose();
         NativeMethods.SetThreadExecutionState(ExecutionState.EsContinuous);
     }
@@ -177,6 +261,7 @@ public sealed class PowerController : IDisposable
         switch (e.Mode)
         {
             case PowerModes.Suspend:
+                CancelPendingResumeProtection();
                 _settings.LastSuspendUtc = DateTimeOffset.UtcNow;
                 _settingsStore.Save(_settings);
                 _logger.Warn("系统即将进入挂起/休眠。");
@@ -202,7 +287,7 @@ public sealed class PowerController : IDisposable
 
     private void ArmResumeProtectionIfNeeded(WakeAnalysis analysis)
     {
-        _resumeTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        CancelPendingResumeProtection();
 
         if (_settings.PolicyMode != PowerPolicyMode.FollowPowerPlan)
         {
@@ -214,28 +299,53 @@ public sealed class PowerController : IDisposable
             return;
         }
 
-        if (_settings.ResumeProtectionOnlyForUnattendedWake && analysis.IsLikelyManualWake)
+        if (_settings.ResumeProtectionOnlyForUnattendedWake && analysis.Kind != WakeKind.Unattended)
         {
-            _logger.Info($"本次恢复被判定为疑似人工唤醒，已跳过自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
+            var reason = analysis.Kind == WakeKind.Manual
+                ? "本次恢复被判定为疑似人工唤醒"
+                : "本次恢复来源不明确，出于安全考虑";
+            _logger.Info($"{reason}，已跳过自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
             return;
         }
 
         var delaySeconds = Math.Max(3, _settings.ResumeProtectionDelaySeconds);
-        _resumeTimer.Change(checked(delaySeconds * 1000), Timeout.Infinite);
+        lock (_resumeProtectionSync)
+        {
+            _resumeProtectionArmedAtTick = NativeMethods.GetTickCount();
+            _resumeTimer.Change(checked(delaySeconds * 1000), Timeout.Infinite);
+        }
         _logger.Warn($"已启动恢复保护，将在 {delaySeconds} 秒后自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
     }
 
     private void OnResumeTimerElapsed()
     {
-        _resumeTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        uint? armedAtTick;
+        lock (_resumeProtectionSync)
+        {
+            _resumeTimer.Change(Timeout.Infinite, Timeout.Infinite);
+            armedAtTick = _resumeProtectionArmedAtTick;
+            _resumeProtectionArmedAtTick = null;
+        }
+
+        if (armedAtTick is null)
+        {
+            return;
+        }
+
+        if (HasUserInteractionSince(armedAtTick.Value))
+        {
+            _logger.Info("检测到恢复后已有人工操作，已取消本次自动回睡。");
+            StateChanged?.Invoke(this, EventArgs.Empty);
+            return;
+        }
 
         if (_settings.ResumeProtectionMode == ResumeProtectionMode.Hibernate)
         {
-            HibernateNow();
+            RequestSuspend(PowerState.Hibernate, "恢复保护到期，执行自动休眠。");
         }
         else
         {
-            SleepNow();
+            RequestSuspend(PowerState.Suspend, "恢复保护到期，执行自动睡眠。");
         }
     }
 
@@ -298,30 +408,32 @@ public sealed class PowerController : IDisposable
         var lastWake = lastWakeText.ToLowerInvariant();
         var wakeTimers = wakeTimersText.ToLowerInvariant();
 
-        if (ContainsAny(lastWake, "power button", "电源按钮", "lid", "打开盖", "keyboard", "鼠标", "mouse"))
+        if (ContainsAny(lastWake, ManualWakeIndicators))
         {
-            return new WakeAnalysis(true, "疑似人工唤醒（按键/开盖/鼠标键盘）");
+            return new WakeAnalysis(WakeKind.Manual, "疑似人工唤醒（按键/开盖/鼠标键盘）");
         }
 
-        if (ContainsAny(lastWake, "device", "usb", "network adapter", "wake on lan", "pci", "网卡"))
+        if (ContainsAny(lastWake, DeviceWakeIndicators))
         {
-            return new WakeAnalysis(false, "疑似设备或网络唤醒");
+            return new WakeAnalysis(WakeKind.Unattended, "疑似设备或网络唤醒");
         }
 
-        if (ContainsAny(lastWake, "wake source: timer", "wake timer", "timer set by", "定时器")
-            || (ContainsAny(wakeTimers, "timer set by", "wake timer", "task scheduler", "updateorchestrator", "maintenance activator", "定时器")
-                && !ContainsAny(wakeTimers, "no active wake timers")))
+        if (ContainsAny(lastWake, TimerWakeIndicators)
+            || (ContainsAny(wakeTimers, TimerWakeIndicators)
+                && !ContainsAny(wakeTimers, NoActiveWakeTimerIndicators)))
         {
-            return new WakeAnalysis(false, "疑似软件或定时器唤醒");
+            return new WakeAnalysis(WakeKind.Unattended, "疑似软件或定时器唤醒");
         }
 
-        if (ContainsAny(lastWake, "history count - 0", "wake history count - 0")
-            || ContainsAny(wakeTimers, "no active wake timers"))
+        if (ContainsAny(lastWake, NoWakeSourceIndicators)
+            || ContainsAny(lastWake, NoWakeHistoryIndicators)
+            || ContainsAny(wakeTimers, DiagnosticsUnavailableIndicators)
+            || ContainsAny(wakeTimers, NoActiveWakeTimerIndicators))
         {
-            return new WakeAnalysis(false, "未识别到明确唤醒源，按非人工唤醒处理");
+            return new WakeAnalysis(WakeKind.Unknown, "唤醒来源不明确");
         }
 
-        return new WakeAnalysis(false, "唤醒来源未知，按非人工唤醒处理");
+        return new WakeAnalysis(WakeKind.Unknown, "唤醒来源未知");
     }
 
     private static (string LastWake, string WakeTimers) SplitDiagnostics(string diagnostics)
@@ -349,6 +461,49 @@ public sealed class PowerController : IDisposable
         return values.Any(source.Contains);
     }
 
+    private void CancelPendingResumeProtection(string? reason = null)
+    {
+        var canceled = false;
+
+        lock (_resumeProtectionSync)
+        {
+            _resumeTimer.Change(Timeout.Infinite, Timeout.Infinite);
+
+            if (_resumeProtectionArmedAtTick is not null)
+            {
+                _resumeProtectionArmedAtTick = null;
+                canceled = true;
+            }
+        }
+
+        if (canceled && !string.IsNullOrWhiteSpace(reason))
+        {
+            _logger.Info(reason);
+        }
+    }
+
+    private static bool HasUserInteractionSince(uint armedAtTick)
+    {
+        var lastInputInfo = new NativeMethods.LastInputInfo
+        {
+            cbSize = (uint)Marshal.SizeOf<NativeMethods.LastInputInfo>()
+        };
+
+        if (!NativeMethods.GetLastInputInfo(ref lastInputInfo))
+        {
+            return false;
+        }
+
+        var elapsed = unchecked(lastInputInfo.dwTime - armedAtTick);
+        return elapsed != 0 && elapsed < 0x80000000u;
+    }
+
+    private void RequestSuspend(PowerState powerState, string logMessage)
+    {
+        _logger.Warn(logMessage);
+        Application.SetSuspendState(powerState, false, false);
+    }
+
     private static void TryKillProcess(Process process)
     {
         try
@@ -360,5 +515,12 @@ public sealed class PowerController : IDisposable
         }
     }
 
-    private readonly record struct WakeAnalysis(bool IsLikelyManualWake, string Summary);
+    private enum WakeKind
+    {
+        Manual,
+        Unattended,
+        Unknown
+    }
+
+    private readonly record struct WakeAnalysis(WakeKind Kind, string Summary);
 }
