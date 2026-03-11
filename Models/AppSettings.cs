@@ -8,6 +8,11 @@ public sealed class AppSettings
     public bool ResumeProtectionOnlyForUnattendedWake { get; set; } = true;
     public bool DisableWakeTimers { get; set; }
     public bool BlockKnownRemoteWakeRequests { get; set; }
+    public bool WakeTimerRestoreSnapshotCaptured { get; set; }
+    public int WakeTimerRestoreAcValue { get; set; }
+    public int WakeTimerRestoreDcValue { get; set; }
+    public bool KnownRemoteWakeRequestBackupCaptured { get; set; }
+    public Dictionary<string, int> KnownRemoteWakeRequestOverrideBackup { get; set; } = [];
     public int ResumeProtectionDelaySeconds { get; set; } = 8;
     public bool StartMinimized { get; set; } = true;
     public bool StartWithWindows { get; set; }

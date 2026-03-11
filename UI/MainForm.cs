@@ -158,10 +158,26 @@ public sealed class MainForm : Form
             UpdateStatus();
             LoadLogs();
         };
+        var restoreSoftwareWakeButton = new Button { Text = "恢复软件唤醒", AutoSize = true };
+        restoreSoftwareWakeButton.Click += (_, _) =>
+        {
+            _controller.RestoreSoftwareWake();
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
         var blockKnownRemoteWakeButton = new Button { Text = "禁止远控保活", AutoSize = true };
         blockKnownRemoteWakeButton.Click += (_, _) =>
         {
             _controller.BlockKnownRemoteWakeRequests();
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
+        var restoreKnownRemoteWakeButton = new Button { Text = "恢复远控默认", AutoSize = true };
+        restoreKnownRemoteWakeButton.Click += (_, _) =>
+        {
+            _controller.RestoreKnownRemoteWakeRequests();
             ApplySettingsToUi(_controller.CurrentSettings);
             UpdateStatus();
             LoadLogs();
@@ -182,7 +198,9 @@ public sealed class MainForm : Form
         actionsFlow.Controls.Add(refreshLogButton);
         actionsFlow.Controls.Add(diagnosticsButton);
         actionsFlow.Controls.Add(blockSoftwareWakeButton);
+        actionsFlow.Controls.Add(restoreSoftwareWakeButton);
         actionsFlow.Controls.Add(blockKnownRemoteWakeButton);
+        actionsFlow.Controls.Add(restoreKnownRemoteWakeButton);
         actionsFlow.Controls.Add(reapplyWakeTimerButton);
         actionsFlow.Controls.Add(exportReportButton);
 

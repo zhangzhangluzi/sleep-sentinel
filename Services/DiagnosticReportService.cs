@@ -38,8 +38,13 @@ public sealed class DiagnosticReportService
         builder.AppendLine($"ResumeProtectionOnlyForUnattendedWake: {settings.ResumeProtectionOnlyForUnattendedWake}");
         builder.AppendLine($"ResumeProtectionDelaySeconds: {settings.ResumeProtectionDelaySeconds}");
         builder.AppendLine($"DisableWakeTimers: {settings.DisableWakeTimers}");
+        builder.AppendLine($"WakeTimerRestoreSnapshotCaptured: {settings.WakeTimerRestoreSnapshotCaptured}");
+        builder.AppendLine($"WakeTimerRestoreAcValue: {settings.WakeTimerRestoreAcValue}");
+        builder.AppendLine($"WakeTimerRestoreDcValue: {settings.WakeTimerRestoreDcValue}");
         builder.AppendLine($"WakeTimerPolicySummary: {settings.WakeTimerPolicySummary}");
         builder.AppendLine($"BlockKnownRemoteWakeRequests: {settings.BlockKnownRemoteWakeRequests}");
+        builder.AppendLine($"KnownRemoteWakeRequestBackupCaptured: {settings.KnownRemoteWakeRequestBackupCaptured}");
+        builder.AppendLine($"KnownRemoteWakeRequestOverrideBackupCount: {settings.KnownRemoteWakeRequestOverrideBackup.Count}");
         builder.AppendLine($"KnownRemoteWakePolicySummary: {settings.KnownRemoteWakePolicySummary}");
         builder.AppendLine($"ProtectionRuleSummary: {_controller.CurrentProtectionRuleSummary}");
         builder.AppendLine($"StartMinimized: {settings.StartMinimized}");
