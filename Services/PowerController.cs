@@ -9,6 +9,8 @@ public sealed class PowerController : IDisposable
 {
     private static readonly TimeSpan ManualResumeSignalWindow = TimeSpan.FromSeconds(20);
     private const int PowerCfgTimeoutMilliseconds = 3000;
+    private const string RequestOverrideRequestTypes = "DISPLAY SYSTEM AWAYMODE";
+    private const string PowerRequestOverrideRegistryRoot = @"SYSTEM\CurrentControlSet\Control\Power\PowerRequestOverride";
     private static readonly string[] ManualWakeIndicators =
     [
         "power button",
@@ -125,6 +127,14 @@ public sealed class PowerController : IDisposable
         {
             RefreshWakeTimerPolicySummary();
         }
+        if (_settings.BlockKnownRemoteWakeRequests)
+        {
+            ApplyKnownRemoteWakePolicy();
+        }
+        else
+        {
+            RefreshKnownRemoteWakePolicySummary();
+        }
         EnsureAutostartMatchesSettings();
         _logger.Info($"应用启动，当前模式：{DescribeMode(_settings.PolicyMode)}。");
     }
@@ -157,6 +167,7 @@ public sealed class PowerController : IDisposable
     public void UpdateSettings(AppSettings updatedSettings)
     {
         CancelPendingResumeProtection();
+        var previousSettings = _settings;
         _settings = updatedSettings;
         _settingsStore.Save(_settings);
         ApplyPolicy(_settings.PolicyMode);
@@ -168,8 +179,20 @@ public sealed class PowerController : IDisposable
         {
             RefreshWakeTimerPolicySummary();
         }
+        if (_settings.BlockKnownRemoteWakeRequests)
+        {
+            ApplyKnownRemoteWakePolicy();
+        }
+        else if (previousSettings.BlockKnownRemoteWakeRequests)
+        {
+            RemoveKnownRemoteWakePolicy();
+        }
+        else
+        {
+            RefreshKnownRemoteWakePolicySummary();
+        }
         EnsureAutostartMatchesSettings();
-        _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}。");
+        _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，远控拦截={_settings.BlockKnownRemoteWakeRequests}。");
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -192,6 +215,13 @@ public sealed class PowerController : IDisposable
         return $"lastwake:{Environment.NewLine}{lastWake}{Environment.NewLine}{Environment.NewLine}waketimers:{Environment.NewLine}{wakeTimers}";
     }
 
+    public string CollectPowerRequestDiagnostics()
+    {
+        var requests = RunPowerCfg("/requests");
+        var overrides = RunPowerCfg("/requestsoverride");
+        return $"requests:{Environment.NewLine}{requests}{Environment.NewLine}{Environment.NewLine}requestsoverride:{Environment.NewLine}{overrides}";
+    }
+
     public void ReapplyWakeTimerPolicy()
     {
         if (_settings.DisableWakeTimers)
@@ -209,6 +239,21 @@ public sealed class PowerController : IDisposable
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public void ReapplyKnownRemoteWakePolicy()
+    {
+        if (_settings.BlockKnownRemoteWakeRequests)
+        {
+            ApplyKnownRemoteWakePolicy();
+        }
+        else
+        {
+            RefreshKnownRemoteWakePolicySummary();
+            _settingsStore.Save(_settings);
+        }
+
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     public void BlockSoftwareWake()
     {
         if (_settings.DisableWakeTimers)
@@ -222,6 +267,22 @@ public sealed class PowerController : IDisposable
         var updatedSettings = _settingsStore.Load();
         updatedSettings.DisableWakeTimers = true;
         _logger.Info("已通过快捷按钮启用软件/定时器唤醒拦截。");
+        UpdateSettings(updatedSettings);
+    }
+
+    public void BlockKnownRemoteWakeRequests()
+    {
+        if (_settings.BlockKnownRemoteWakeRequests)
+        {
+            _logger.Info("常见远程软件保持唤醒拦截已启用，正在重新应用规则。");
+            ApplyKnownRemoteWakePolicy();
+            StateChanged?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        var updatedSettings = _settingsStore.Load();
+        updatedSettings.BlockKnownRemoteWakeRequests = true;
+        _logger.Info("已通过快捷按钮启用常见远程软件保持唤醒拦截。");
         UpdateSettings(updatedSettings);
     }
 
@@ -292,6 +353,81 @@ public sealed class PowerController : IDisposable
         _settings.WakeTimerPolicySummary = _settings.DisableWakeTimers
             ? "已配置为由应用禁用当前电源计划的唤醒定时器"
             : "未由应用接管；保留系统当前唤醒定时器策略";
+        _settingsStore.Save(_settings);
+    }
+
+    private void ApplyKnownRemoteWakePolicy()
+    {
+        var failures = new List<string>();
+
+        foreach (var entry in RemoteWakeBlockCatalog.Entries)
+        {
+            var result = RunPowerCfg($"/requestsoverride {entry.CallerTypeArgument} \"{entry.Name}\" {RequestOverrideRequestTypes}");
+            if (!string.IsNullOrWhiteSpace(result))
+            {
+                failures.Add($"{entry.CallerTypeArgument}:{entry.Name}: {result}");
+            }
+        }
+
+        var overrides = RunPowerCfg("/requestsoverride");
+        var appliedCount = CountManagedRequestOverrideEntries(overrides);
+
+        if (failures.Count == 0)
+        {
+            _settings.KnownRemoteWakePolicySummary =
+                $"已拦截常见远程软件的 DISPLAY/SYSTEM/AWAYMODE 保持唤醒请求（命中 {appliedCount}/{RemoteWakeBlockCatalog.Entries.Count} 条规则）";
+            _settingsStore.Save(_settings);
+            _logger.Info($"{_settings.KnownRemoteWakePolicySummary}。覆盖：{RemoteWakeBlockCatalog.ProductSummary}。");
+            return;
+        }
+
+        _settings.KnownRemoteWakePolicySummary = $"应用远程软件拦截规则时收到输出，请检查日志（已命中 {appliedCount}/{RemoteWakeBlockCatalog.Entries.Count} 条规则）";
+        _settingsStore.Save(_settings);
+        _logger.Warn($"应用远程软件拦截规则时收到输出：{Environment.NewLine}{string.Join(Environment.NewLine, failures)}");
+    }
+
+    private void RemoveKnownRemoteWakePolicy()
+    {
+        var failures = new List<string>();
+
+        foreach (var entry in RemoteWakeBlockCatalog.Entries)
+        {
+            if (TryRemoveRequestOverride(entry, out var failureMessage))
+            {
+                continue;
+            }
+
+            failures.Add(failureMessage!);
+        }
+
+        var overrides = RunPowerCfg("/requestsoverride");
+        var remainingCount = CountManagedRequestOverrideEntries(overrides);
+
+        if (failures.Count == 0)
+        {
+            _settings.KnownRemoteWakePolicySummary = remainingCount == 0
+                ? "已移除应用管理的常见远程软件保持唤醒拦截规则"
+                : $"已尝试移除应用管理的常见远程软件拦截规则，但系统中仍检测到 {remainingCount} 条相关请求替代";
+            _settingsStore.Save(_settings);
+            _logger.Info(_settings.KnownRemoteWakePolicySummary);
+            return;
+        }
+
+        _settings.KnownRemoteWakePolicySummary = $"移除远程软件拦截规则时收到输出，请检查日志（系统中仍检测到 {remainingCount} 条相关请求替代）";
+        _settingsStore.Save(_settings);
+        _logger.Warn($"移除远程软件拦截规则时收到输出：{Environment.NewLine}{string.Join(Environment.NewLine, failures)}");
+    }
+
+    private void RefreshKnownRemoteWakePolicySummary()
+    {
+        var overrides = RunPowerCfg("/requestsoverride");
+        var managedCount = CountManagedRequestOverrideEntries(overrides);
+
+        _settings.KnownRemoteWakePolicySummary = _settings.BlockKnownRemoteWakeRequests
+            ? $"已配置为拦截常见远程软件的保持唤醒请求（当前检测到 {managedCount} 条规则）"
+            : managedCount == 0
+                ? "未由应用接管；未检测到常见远程软件保持唤醒拦截规则"
+                : $"未由应用接管；系统当前仍存在 {managedCount} 条常见远程软件请求替代";
         _settingsStore.Save(_settings);
     }
 
@@ -575,6 +711,97 @@ public sealed class PowerController : IDisposable
     private static bool ContainsAny(string source, params string[] values)
     {
         return values.Any(source.Contains);
+    }
+
+    private static int CountManagedRequestOverrideEntries(string requestOverrides)
+    {
+        if (string.IsNullOrWhiteSpace(requestOverrides))
+        {
+            return 0;
+        }
+
+        var activeEntries = ParseRequestOverrideEntries(requestOverrides);
+        return RemoteWakeBlockCatalog.Entries.Count(entry =>
+            activeEntries.Contains($"{entry.CallerTypeArgument}:{entry.Name}"));
+    }
+
+    private static HashSet<string> ParseRequestOverrideEntries(string requestOverrides)
+    {
+        var entries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? currentCallerType = null;
+
+        foreach (var rawLine in requestOverrides.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+        {
+            var line = rawLine.Trim();
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            if (line.Equals("[PROCESS]", StringComparison.OrdinalIgnoreCase))
+            {
+                currentCallerType = "process";
+                continue;
+            }
+
+            if (line.Equals("[SERVICE]", StringComparison.OrdinalIgnoreCase))
+            {
+                currentCallerType = "service";
+                continue;
+            }
+
+            if (line.StartsWith("[", StringComparison.Ordinal) && line.EndsWith("]", StringComparison.Ordinal))
+            {
+                currentCallerType = null;
+                continue;
+            }
+
+            if (currentCallerType is null)
+            {
+                continue;
+            }
+
+            var separatorIndex = line.IndexOf(' ');
+            var name = separatorIndex >= 0 ? line[..separatorIndex] : line;
+            entries.Add($"{currentCallerType}:{name}");
+        }
+
+        return entries;
+    }
+
+    private bool TryRemoveRequestOverride(PowerRequestOverrideEntry entry, out string? failureMessage)
+    {
+        failureMessage = null;
+
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                Path.Combine(PowerRequestOverrideRegistryRoot, entry.CallerType.ToString()),
+                writable: true);
+
+            if (key is null)
+            {
+                return true;
+            }
+
+            key.DeleteValue(entry.Name, false);
+            return true;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            failureMessage = $"{entry.CallerTypeArgument}:{entry.Name}: {ex.Message}";
+            return false;
+        }
+        catch (System.Security.SecurityException ex)
+        {
+            failureMessage = $"{entry.CallerTypeArgument}:{entry.Name}: {ex.Message}";
+            return false;
+        }
+        catch (IOException ex)
+        {
+            failureMessage = $"{entry.CallerTypeArgument}:{entry.Name}: {ex.Message}";
+            return false;
+        }
     }
 
     private void RecordManualResumeSignal(string reason)

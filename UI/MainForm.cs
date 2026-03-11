@@ -15,6 +15,7 @@ public sealed class MainForm : Form
     private readonly NumericUpDown _resumeDelayInput;
     private readonly CheckBox _onlyUnattendedWakeCheckbox;
     private readonly CheckBox _disableWakeTimersCheckbox;
+    private readonly CheckBox _blockKnownRemoteWakeCheckbox;
     private readonly CheckBox _startMinimizedCheckbox;
     private readonly CheckBox _autostartCheckbox;
     private readonly Label _statusLabel;
@@ -98,6 +99,11 @@ public sealed class MainForm : Form
             AutoSize = true,
             Text = "同时关闭当前电源计划的唤醒定时器（AC/DC）"
         };
+        _blockKnownRemoteWakeCheckbox = new CheckBox
+        {
+            AutoSize = true,
+            Text = "拦截常见远程软件的保持唤醒请求（ToDesk、向日葵、GameViewer/UU、AnyDesk、TeamViewer、RustDesk）"
+        };
 
         _startMinimizedCheckbox = new CheckBox { AutoSize = true, Text = "启动后仅驻留托盘" };
         _autostartCheckbox = new CheckBox { AutoSize = true, Text = "开机自启" };
@@ -113,11 +119,12 @@ public sealed class MainForm : Form
         AddSettingRow(settingsPanel, 2, "保护细节", resumeOptionsFlow);
         AddSettingRow(settingsPanel, 3, "唤醒过滤", _onlyUnattendedWakeCheckbox);
         AddSettingRow(settingsPanel, 4, "电源计划", _disableWakeTimersCheckbox);
+        AddSettingRow(settingsPanel, 5, "远控拦截", _blockKnownRemoteWakeCheckbox);
 
         var startupFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
         startupFlow.Controls.Add(_startMinimizedCheckbox);
         startupFlow.Controls.Add(_autostartCheckbox);
-        AddSettingRow(settingsPanel, 5, "启动行为", startupFlow);
+        AddSettingRow(settingsPanel, 6, "启动行为", startupFlow);
 
         root.Controls.Add(settingsPanel);
 
@@ -151,6 +158,14 @@ public sealed class MainForm : Form
             UpdateStatus();
             LoadLogs();
         };
+        var blockKnownRemoteWakeButton = new Button { Text = "禁止远控保活", AutoSize = true };
+        blockKnownRemoteWakeButton.Click += (_, _) =>
+        {
+            _controller.BlockKnownRemoteWakeRequests();
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
         var reapplyWakeTimerButton = new Button { Text = "重新应用唤醒定时器策略", AutoSize = true };
         reapplyWakeTimerButton.Click += (_, _) =>
         {
@@ -167,6 +182,7 @@ public sealed class MainForm : Form
         actionsFlow.Controls.Add(refreshLogButton);
         actionsFlow.Controls.Add(diagnosticsButton);
         actionsFlow.Controls.Add(blockSoftwareWakeButton);
+        actionsFlow.Controls.Add(blockKnownRemoteWakeButton);
         actionsFlow.Controls.Add(reapplyWakeTimerButton);
         actionsFlow.Controls.Add(exportReportButton);
 
@@ -242,6 +258,7 @@ public sealed class MainForm : Form
             : ResumeProtectionMode.Sleep;
         settings.ResumeProtectionOnlyForUnattendedWake = _onlyUnattendedWakeCheckbox.Checked;
         settings.DisableWakeTimers = _disableWakeTimersCheckbox.Checked;
+        settings.BlockKnownRemoteWakeRequests = _blockKnownRemoteWakeCheckbox.Checked;
         settings.ResumeProtectionDelaySeconds = (int)_resumeDelayInput.Value;
         settings.StartMinimized = _startMinimizedCheckbox.Checked;
         settings.StartWithWindows = _autostartCheckbox.Checked;
@@ -259,6 +276,7 @@ public sealed class MainForm : Form
         _resumeActionComboBox.SelectedIndex = settings.ResumeProtectionMode == ResumeProtectionMode.Hibernate ? 1 : 0;
         _onlyUnattendedWakeCheckbox.Checked = settings.ResumeProtectionOnlyForUnattendedWake;
         _disableWakeTimersCheckbox.Checked = settings.DisableWakeTimers;
+        _blockKnownRemoteWakeCheckbox.Checked = settings.BlockKnownRemoteWakeRequests;
         _resumeDelayInput.Value = Math.Clamp(settings.ResumeProtectionDelaySeconds, 3, 600);
         _startMinimizedCheckbox.Checked = settings.StartMinimized;
         _autostartCheckbox.Checked = settings.StartWithWindows;
@@ -283,6 +301,7 @@ public sealed class MainForm : Form
             $"保护规则：{_controller.CurrentProtectionRuleSummary}{Environment.NewLine}" +
             $"最近一次唤醒判定：{settings.LastWakeSummary}{Environment.NewLine}" +
             $"唤醒定时器策略：{settings.WakeTimerPolicySummary}{Environment.NewLine}" +
+            $"远控拦截策略：{settings.KnownRemoteWakePolicySummary}{Environment.NewLine}" +
             $"配置文件：{_settingsStore.SettingsPath}{Environment.NewLine}" +
             $"日志目录：{_logger.LogDirectory}{Environment.NewLine}" +
             $"上次挂起：{FormatTime(settings.LastSuspendUtc)} | 上次恢复：{FormatTime(settings.LastResumeUtc)}";

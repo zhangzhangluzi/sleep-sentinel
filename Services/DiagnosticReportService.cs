@@ -25,6 +25,7 @@ public sealed class DiagnosticReportService
         var settings = _settingsStore.Load();
         var recentLogs = _logger.ReadRecent(400);
         var wakeDiagnostics = _controller.CollectWakeDiagnostics();
+        var powerRequestDiagnostics = _controller.CollectPowerRequestDiagnostics();
 
         var builder = new StringBuilder();
         builder.AppendLine("SleepSentinel Diagnostic Report");
@@ -38,6 +39,8 @@ public sealed class DiagnosticReportService
         builder.AppendLine($"ResumeProtectionDelaySeconds: {settings.ResumeProtectionDelaySeconds}");
         builder.AppendLine($"DisableWakeTimers: {settings.DisableWakeTimers}");
         builder.AppendLine($"WakeTimerPolicySummary: {settings.WakeTimerPolicySummary}");
+        builder.AppendLine($"BlockKnownRemoteWakeRequests: {settings.BlockKnownRemoteWakeRequests}");
+        builder.AppendLine($"KnownRemoteWakePolicySummary: {settings.KnownRemoteWakePolicySummary}");
         builder.AppendLine($"ProtectionRuleSummary: {_controller.CurrentProtectionRuleSummary}");
         builder.AppendLine($"StartMinimized: {settings.StartMinimized}");
         builder.AppendLine($"StartWithWindows: {settings.StartWithWindows}");
@@ -52,6 +55,9 @@ public sealed class DiagnosticReportService
         builder.AppendLine();
         builder.AppendLine("[WakeDiagnostics]");
         builder.AppendLine(wakeDiagnostics);
+        builder.AppendLine();
+        builder.AppendLine("[PowerRequestDiagnostics]");
+        builder.AppendLine(powerRequestDiagnostics);
         builder.AppendLine();
         builder.AppendLine("[RecentLogs]");
 
