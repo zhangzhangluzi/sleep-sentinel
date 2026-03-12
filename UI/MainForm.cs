@@ -14,8 +14,8 @@ public sealed class MainForm : Form
     private readonly ComboBox _resumeActionComboBox;
     private readonly NumericUpDown _resumeDelayInput;
     private readonly CheckBox _onlyUnattendedWakeCheckbox;
-    private readonly CheckBox _wakeTimerToggleButton;
-    private readonly CheckBox _remoteWakeToggleButton;
+    private readonly CheckBox _disableWakeTimersCheckbox;
+    private readonly CheckBox _blockKnownRemoteWakeCheckbox;
     private readonly CheckBox _startMinimizedCheckbox;
     private readonly CheckBox _autostartCheckbox;
     private readonly Label _statusLabel;
@@ -24,6 +24,7 @@ public sealed class MainForm : Form
     private readonly TextBox _logTextBox;
     private readonly EventHandler _stateChangedHandler;
     private readonly Icon _appIcon;
+    private bool _suppressInteractiveToggleEvents;
 
     public MainForm(PowerController controller, FileLogger logger, SettingsStore settingsStore, Icon appIcon)
     {
@@ -95,6 +96,56 @@ public sealed class MainForm : Form
             AutoSize = true,
             Text = "仅在人工行为时跳过；人工包括键盘、鼠标、开盖、解锁、控制台/远程接管、登录"
         };
+        _disableWakeTimersCheckbox = new CheckBox
+        {
+            AutoSize = true,
+            Text = "关闭当前电源计划的唤醒定时器（AC/DC）"
+        };
+        _disableWakeTimersCheckbox.CheckedChanged += (_, _) =>
+        {
+            if (_suppressInteractiveToggleEvents)
+            {
+                return;
+            }
+
+            if (_disableWakeTimersCheckbox.Checked)
+            {
+                _controller.BlockSoftwareWake();
+            }
+            else
+            {
+                _controller.RestoreSoftwareWake();
+            }
+
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
+        _blockKnownRemoteWakeCheckbox = new CheckBox
+        {
+            AutoSize = true,
+            Text = "拦截常见远程软件的保持唤醒请求（ToDesk、向日葵、GameViewer/UU、AnyDesk、TeamViewer、RustDesk）"
+        };
+        _blockKnownRemoteWakeCheckbox.CheckedChanged += (_, _) =>
+        {
+            if (_suppressInteractiveToggleEvents)
+            {
+                return;
+            }
+
+            if (_blockKnownRemoteWakeCheckbox.Checked)
+            {
+                _controller.BlockKnownRemoteWakeRequests();
+            }
+            else
+            {
+                _controller.RestoreKnownRemoteWakeRequests();
+            }
+
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
 
         _startMinimizedCheckbox = new CheckBox { AutoSize = true, Text = "启动后仅驻留托盘" };
         _autostartCheckbox = new CheckBox { AutoSize = true, Text = "开机自启" };
@@ -111,22 +162,6 @@ public sealed class MainForm : Form
         AddSettingRow(settingsPanel, 3, "唤醒过滤", _onlyUnattendedWakeCheckbox);
 
         var wakeTimerActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
-        _wakeTimerToggleButton = CreateToggleActionButton("软件唤醒拦截");
-        _wakeTimerToggleButton.Click += (_, _) =>
-        {
-            if (_controller.CurrentSettings.DisableWakeTimers)
-            {
-                _controller.RestoreSoftwareWake();
-            }
-            else
-            {
-                _controller.BlockSoftwareWake();
-            }
-
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
-        };
         var reapplyWakeTimerButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyWakeTimerButton.Click += (_, _) =>
         {
@@ -136,30 +171,23 @@ public sealed class MainForm : Form
             LoadLogs();
         };
         _wakeTimerQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
-        wakeTimerActions.Controls.Add(_wakeTimerToggleButton);
+        wakeTimerActions.Controls.Add(_disableWakeTimersCheckbox);
         wakeTimerActions.Controls.Add(reapplyWakeTimerButton);
         wakeTimerActions.Controls.Add(_wakeTimerQuickStateLabel);
         AddSettingRow(settingsPanel, 4, "软件唤醒", wakeTimerActions);
 
         var remoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
-        _remoteWakeToggleButton = CreateToggleActionButton("远控保活拦截");
-        _remoteWakeToggleButton.Click += (_, _) =>
+        var reapplyRemoteWakeButton = new Button { Text = "重新应用", AutoSize = true };
+        reapplyRemoteWakeButton.Click += (_, _) =>
         {
-            if (_controller.CurrentSettings.BlockKnownRemoteWakeRequests)
-            {
-                _controller.RestoreKnownRemoteWakeRequests();
-            }
-            else
-            {
-                _controller.BlockKnownRemoteWakeRequests();
-            }
-
+            _controller.ReapplyKnownRemoteWakePolicy();
             ApplySettingsToUi(_controller.CurrentSettings);
             UpdateStatus();
             LoadLogs();
         };
         _remoteWakeQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
-        remoteWakeActions.Controls.Add(_remoteWakeToggleButton);
+        remoteWakeActions.Controls.Add(_blockKnownRemoteWakeCheckbox);
+        remoteWakeActions.Controls.Add(reapplyRemoteWakeButton);
         remoteWakeActions.Controls.Add(_remoteWakeQuickStateLabel);
         AddSettingRow(settingsPanel, 5, "远控拦截", remoteWakeActions);
 
@@ -286,14 +314,23 @@ public sealed class MainForm : Form
     private void ApplySettingsToUi(AppSettings settings)
     {
         _policyModeComboBox.SelectedIndex = settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely ? 1 : 0;
-        _resumeProtectionCheckbox.Checked = settings.ResumeProtectionEnabled;
-        _resumeActionComboBox.SelectedIndex = settings.ResumeProtectionMode == ResumeProtectionMode.Hibernate ? 1 : 0;
-        _onlyUnattendedWakeCheckbox.Checked = settings.ResumeProtectionOnlyForUnattendedWake;
-        _resumeDelayInput.Value = Math.Clamp(settings.ResumeProtectionDelaySeconds, 3, 600);
-        _startMinimizedCheckbox.Checked = settings.StartMinimized;
-        _autostartCheckbox.Checked = settings.StartWithWindows;
-        _wakeTimerToggleButton.Checked = settings.DisableWakeTimers;
-        _remoteWakeToggleButton.Checked = settings.BlockKnownRemoteWakeRequests;
+        _suppressInteractiveToggleEvents = true;
+        try
+        {
+            _resumeProtectionCheckbox.Checked = settings.ResumeProtectionEnabled;
+            _resumeActionComboBox.SelectedIndex = settings.ResumeProtectionMode == ResumeProtectionMode.Hibernate ? 1 : 0;
+            _onlyUnattendedWakeCheckbox.Checked = settings.ResumeProtectionOnlyForUnattendedWake;
+            _resumeDelayInput.Value = Math.Clamp(settings.ResumeProtectionDelaySeconds, 3, 600);
+            _startMinimizedCheckbox.Checked = settings.StartMinimized;
+            _autostartCheckbox.Checked = settings.StartWithWindows;
+            _disableWakeTimersCheckbox.Checked = settings.DisableWakeTimers;
+            _blockKnownRemoteWakeCheckbox.Checked = settings.BlockKnownRemoteWakeRequests;
+        }
+        finally
+        {
+            _suppressInteractiveToggleEvents = false;
+        }
+
         _wakeTimerQuickStateLabel.Text = settings.DisableWakeTimers ? "当前：已拦截" : "当前：未接管";
         _remoteWakeQuickStateLabel.Text = settings.BlockKnownRemoteWakeRequests ? "当前：已拦截" : "当前：未接管";
     }
@@ -373,20 +410,6 @@ public sealed class MainForm : Form
             Padding = new Padding(0, 7, 12, 7)
         }, 0, rowIndex);
         panel.Controls.Add(control, 1, rowIndex);
-    }
-
-    private static CheckBox CreateToggleActionButton(string text)
-    {
-        return new CheckBox
-        {
-            Appearance = Appearance.Button,
-            AutoCheck = false,
-            AutoSize = true,
-            Text = text,
-            TextAlign = ContentAlignment.MiddleCenter,
-            Padding = new Padding(10, 4, 10, 4),
-            UseVisualStyleBackColor = true
-        };
     }
 
     private static string FormatTime(DateTimeOffset? value)
