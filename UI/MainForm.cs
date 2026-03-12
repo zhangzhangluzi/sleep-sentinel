@@ -14,11 +14,11 @@ public sealed class MainForm : Form
     private readonly ComboBox _resumeActionComboBox;
     private readonly NumericUpDown _resumeDelayInput;
     private readonly CheckBox _onlyUnattendedWakeCheckbox;
-    private readonly CheckBox _disableWakeTimersCheckbox;
-    private readonly CheckBox _blockKnownRemoteWakeCheckbox;
     private readonly CheckBox _startMinimizedCheckbox;
     private readonly CheckBox _autostartCheckbox;
     private readonly Label _statusLabel;
+    private readonly Label _wakeTimerQuickStateLabel;
+    private readonly Label _remoteWakeQuickStateLabel;
     private readonly TextBox _logTextBox;
     private readonly EventHandler _stateChangedHandler;
     private readonly Icon _appIcon;
@@ -94,17 +94,6 @@ public sealed class MainForm : Form
             Text = "仅在人工行为时跳过；人工包括键盘、鼠标、开盖、解锁、控制台/远程接管、登录"
         };
 
-        _disableWakeTimersCheckbox = new CheckBox
-        {
-            AutoSize = true,
-            Text = "同时关闭当前电源计划的唤醒定时器（AC/DC）"
-        };
-        _blockKnownRemoteWakeCheckbox = new CheckBox
-        {
-            AutoSize = true,
-            Text = "拦截常见远程软件的保持唤醒请求（ToDesk、向日葵、GameViewer/UU、AnyDesk、TeamViewer、RustDesk）"
-        };
-
         _startMinimizedCheckbox = new CheckBox { AutoSize = true, Text = "启动后仅驻留托盘" };
         _autostartCheckbox = new CheckBox { AutoSize = true, Text = "开机自启" };
 
@@ -118,8 +107,61 @@ public sealed class MainForm : Form
         resumeOptionsFlow.Controls.Add(_resumeDelayInput);
         AddSettingRow(settingsPanel, 2, "保护细节", resumeOptionsFlow);
         AddSettingRow(settingsPanel, 3, "唤醒过滤", _onlyUnattendedWakeCheckbox);
-        AddSettingRow(settingsPanel, 4, "电源计划", _disableWakeTimersCheckbox);
-        AddSettingRow(settingsPanel, 5, "远控拦截", _blockKnownRemoteWakeCheckbox);
+
+        var wakeTimerActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
+        var blockSoftwareWakeButton = new Button { Text = "禁止软件唤醒", AutoSize = true };
+        blockSoftwareWakeButton.Click += (_, _) =>
+        {
+            _controller.BlockSoftwareWake();
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
+        var restoreSoftwareWakeButton = new Button { Text = "恢复软件唤醒", AutoSize = true };
+        restoreSoftwareWakeButton.Click += (_, _) =>
+        {
+            _controller.RestoreSoftwareWake();
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
+        var reapplyWakeTimerButton = new Button { Text = "重新应用", AutoSize = true };
+        reapplyWakeTimerButton.Click += (_, _) =>
+        {
+            _controller.ReapplyWakeTimerPolicy();
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
+        _wakeTimerQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
+        wakeTimerActions.Controls.Add(blockSoftwareWakeButton);
+        wakeTimerActions.Controls.Add(restoreSoftwareWakeButton);
+        wakeTimerActions.Controls.Add(reapplyWakeTimerButton);
+        wakeTimerActions.Controls.Add(_wakeTimerQuickStateLabel);
+        AddSettingRow(settingsPanel, 4, "软件唤醒", wakeTimerActions);
+
+        var remoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
+        var blockKnownRemoteWakeButton = new Button { Text = "禁止远控保活", AutoSize = true };
+        blockKnownRemoteWakeButton.Click += (_, _) =>
+        {
+            _controller.BlockKnownRemoteWakeRequests();
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
+        var restoreKnownRemoteWakeButton = new Button { Text = "恢复远控默认", AutoSize = true };
+        restoreKnownRemoteWakeButton.Click += (_, _) =>
+        {
+            _controller.RestoreKnownRemoteWakeRequests();
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
+        _remoteWakeQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
+        remoteWakeActions.Controls.Add(blockKnownRemoteWakeButton);
+        remoteWakeActions.Controls.Add(restoreKnownRemoteWakeButton);
+        remoteWakeActions.Controls.Add(_remoteWakeQuickStateLabel);
+        AddSettingRow(settingsPanel, 5, "远控拦截", remoteWakeActions);
 
         var startupFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
         startupFlow.Controls.Add(_startMinimizedCheckbox);
@@ -150,45 +192,6 @@ public sealed class MainForm : Form
             _logger.Warn(_controller.CollectWakeDiagnostics());
             LoadLogs();
         };
-        var blockSoftwareWakeButton = new Button { Text = "禁止软件唤醒", AutoSize = true };
-        blockSoftwareWakeButton.Click += (_, _) =>
-        {
-            _controller.BlockSoftwareWake();
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
-        };
-        var restoreSoftwareWakeButton = new Button { Text = "恢复软件唤醒", AutoSize = true };
-        restoreSoftwareWakeButton.Click += (_, _) =>
-        {
-            _controller.RestoreSoftwareWake();
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
-        };
-        var blockKnownRemoteWakeButton = new Button { Text = "禁止远控保活", AutoSize = true };
-        blockKnownRemoteWakeButton.Click += (_, _) =>
-        {
-            _controller.BlockKnownRemoteWakeRequests();
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
-        };
-        var restoreKnownRemoteWakeButton = new Button { Text = "恢复远控默认", AutoSize = true };
-        restoreKnownRemoteWakeButton.Click += (_, _) =>
-        {
-            _controller.RestoreKnownRemoteWakeRequests();
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
-        };
-        var reapplyWakeTimerButton = new Button { Text = "重新应用唤醒定时器策略", AutoSize = true };
-        reapplyWakeTimerButton.Click += (_, _) =>
-        {
-            _controller.ReapplyWakeTimerPolicy();
-            UpdateStatus();
-            LoadLogs();
-        };
         var exportReportButton = new Button { Text = "导出诊断报告", AutoSize = true };
         exportReportButton.Click += (_, _) => ExportDiagnosticReport();
 
@@ -197,11 +200,6 @@ public sealed class MainForm : Form
         actionsFlow.Controls.Add(hibernateButton);
         actionsFlow.Controls.Add(refreshLogButton);
         actionsFlow.Controls.Add(diagnosticsButton);
-        actionsFlow.Controls.Add(blockSoftwareWakeButton);
-        actionsFlow.Controls.Add(restoreSoftwareWakeButton);
-        actionsFlow.Controls.Add(blockKnownRemoteWakeButton);
-        actionsFlow.Controls.Add(restoreKnownRemoteWakeButton);
-        actionsFlow.Controls.Add(reapplyWakeTimerButton);
         actionsFlow.Controls.Add(exportReportButton);
 
         _statusLabel = new Label { AutoSize = true, Dock = DockStyle.Top, Padding = new Padding(0, 0, 0, 12) };
@@ -275,8 +273,6 @@ public sealed class MainForm : Form
             ? ResumeProtectionMode.Hibernate
             : ResumeProtectionMode.Sleep;
         settings.ResumeProtectionOnlyForUnattendedWake = _onlyUnattendedWakeCheckbox.Checked;
-        settings.DisableWakeTimers = _disableWakeTimersCheckbox.Checked;
-        settings.BlockKnownRemoteWakeRequests = _blockKnownRemoteWakeCheckbox.Checked;
         settings.ResumeProtectionDelaySeconds = (int)_resumeDelayInput.Value;
         settings.StartMinimized = _startMinimizedCheckbox.Checked;
         settings.StartWithWindows = _autostartCheckbox.Checked;
@@ -293,11 +289,11 @@ public sealed class MainForm : Form
         _resumeProtectionCheckbox.Checked = settings.ResumeProtectionEnabled;
         _resumeActionComboBox.SelectedIndex = settings.ResumeProtectionMode == ResumeProtectionMode.Hibernate ? 1 : 0;
         _onlyUnattendedWakeCheckbox.Checked = settings.ResumeProtectionOnlyForUnattendedWake;
-        _disableWakeTimersCheckbox.Checked = settings.DisableWakeTimers;
-        _blockKnownRemoteWakeCheckbox.Checked = settings.BlockKnownRemoteWakeRequests;
         _resumeDelayInput.Value = Math.Clamp(settings.ResumeProtectionDelaySeconds, 3, 600);
         _startMinimizedCheckbox.Checked = settings.StartMinimized;
         _autostartCheckbox.Checked = settings.StartWithWindows;
+        _wakeTimerQuickStateLabel.Text = settings.DisableWakeTimers ? "当前：已拦截" : "当前：未接管";
+        _remoteWakeQuickStateLabel.Text = settings.BlockKnownRemoteWakeRequests ? "当前：已拦截" : "当前：未接管";
     }
 
     private void UpdateStatus()
