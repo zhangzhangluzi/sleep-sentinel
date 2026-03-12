@@ -1,5 +1,5 @@
 #define MyAppName "SleepSentinel"
-#define MyAppVersion "1.0.15"
+#define MyAppVersion "1.0.16"
 #define MyAppPublisher "Zhang"
 #define MyAppExeName "SleepSentinel.exe"
 
@@ -12,7 +12,7 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=installer
-OutputBaseFilename=SleepSentinel-Setup-win-x64
+OutputBaseFilename=SleepSentinel-Setup-v{#MyAppVersion}-win-x64
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern

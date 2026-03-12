@@ -17,9 +17,24 @@
     <Description>Windows tray utility that protects sleep and hibernate behavior from unwanted wake-ups.</Description>
     <Company>Zhang</Company>
     <Authors>Zhang</Authors>
-    <AssemblyVersion>1.0.15.0</AssemblyVersion>
-    <FileVersion>1.0.15.0</FileVersion>
-    <Version>1.0.15</Version>
-    <InformationalVersion>1.0.15</InformationalVersion>
+    <AssemblyVersion>1.0.16.0</AssemblyVersion>
+    <FileVersion>1.0.16.0</FileVersion>
+    <Version>1.0.16</Version>
+    <InformationalVersion>1.0.16</InformationalVersion>
   </PropertyGroup>
+
+  <Target Name="CreateVersionedPublishExe" AfterTargets="Publish">
+    <PropertyGroup>
+      <VersionedPublishExe>$(PublishDir)SleepSentinel-v$(Version)-win-x64.exe</VersionedPublishExe>
+    </PropertyGroup>
+    <ItemGroup>
+      <OldVersionedPublishExe Include="$(PublishDir)SleepSentinel-v*-win-x64.exe" Exclude="$(VersionedPublishExe)" />
+    </ItemGroup>
+    <Delete Files="@(OldVersionedPublishExe)" />
+    <Copy
+      SourceFiles="$(PublishDir)SleepSentinel.exe"
+      DestinationFiles="$(VersionedPublishExe)"
+      SkipUnchangedFiles="true"
+      Condition="Exists('$(PublishDir)SleepSentinel.exe')" />
+  </Target>
 </Project>

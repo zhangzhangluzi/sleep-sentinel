@@ -24,6 +24,16 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Resolve Version
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content ".\SleepSentinel.csproj"
+          $appVersion = $project.Project.PropertyGroup.Version
+          "app_version=$appVersion" >> $env:GITHUB_OUTPUT
+          "installer_name=SleepSentinel-Setup-v$appVersion-win-x64.exe" >> $env:GITHUB_OUTPUT
+          "portable_name=SleepSentinel-v$appVersion-win-x64.exe" >> $env:GITHUB_OUTPUT
+
       - name: Publish app
         run: dotnet publish .\SleepSentinel.csproj -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true
 
@@ -38,8 +48,14 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SleepSentinel-Setup-win-x64
-          path: installer/SleepSentinel-Setup-win-x64.exe
+          name: ${{ steps.version.outputs.installer_name }}
+          path: installer/${{ steps.version.outputs.installer_name }}
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.portable_name }}
+          path: bin/Release/net8.0-windows/win-x64/publish/${{ steps.version.outputs.portable_name }}
 
       - name: Publish GitHub release asset
         if: startsWith(github.ref, 'refs/tags/v')
@@ -49,7 +65,10 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
-          $files = @("installer/SleepSentinel-Setup-win-x64.exe")
+          $files = @(
+            "installer/${{ steps.version.outputs.installer_name }}",
+            "bin/Release/net8.0-windows/win-x64/publish/${{ steps.version.outputs.portable_name }}"
+          )
 
           gh release view $tag --repo $repo *> $null
           if ($LASTEXITCODE -eq 0) {
