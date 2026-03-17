@@ -1,4 +1,5 @@
 using SleepSentinel.Services;
+using System.Runtime.InteropServices;
 
 namespace SleepSentinel.UI;
 
@@ -9,15 +10,25 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly NotifyIcon _notifyIcon;
     private readonly MainForm _mainForm;
     private readonly Icon _appIcon;
+    private readonly EventWaitHandle _activationSignal;
+    private readonly RegisteredWaitHandle _activationWaitHandle;
+    private readonly TrayMessageWindow _trayMessageWindow;
     private readonly ToolStripMenuItem _followPowerPlanMenuItem;
     private readonly ToolStripMenuItem _keepAwakeMenuItem;
     private readonly EventHandler _stateChangedHandler;
+    private bool _isExiting;
 
-    public TrayApplicationContext(PowerController controller, FileLogger logger, SettingsStore settingsStore, Icon appIcon)
+    public TrayApplicationContext(
+        PowerController controller,
+        FileLogger logger,
+        SettingsStore settingsStore,
+        Icon appIcon,
+        EventWaitHandle activationSignal)
     {
         _controller = controller;
         _logger = logger;
         _appIcon = (Icon)appIcon.Clone();
+        _activationSignal = activationSignal;
 
         _mainForm = new MainForm(controller, logger, settingsStore, _appIcon);
         _mainForm.FormClosed += (_, _) =>
@@ -28,6 +39,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             }
         };
         _ = _mainForm.Handle;
+        _trayMessageWindow = new TrayMessageWindow(OnTaskbarCreated);
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开面板", null, (_, _) => ShowMainForm());
@@ -63,6 +75,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.DoubleClick += (_, _) => ShowMainForm();
         _stateChangedHandler = (_, _) => RefreshTrayTextOnUiThread();
         _controller.StateChanged += _stateChangedHandler;
+        _activationWaitHandle = ThreadPool.RegisterWaitForSingleObject(
+            _activationSignal,
+            static (state, _) => ((TrayApplicationContext)state!).OnExternalActivationRequested(),
+            this,
+            Timeout.Infinite,
+            false);
         RefreshTrayText();
 
         if (!_controller.CurrentSettings.StartMinimized)
@@ -73,7 +91,10 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        _isExiting = true;
         _controller.StateChanged -= _stateChangedHandler;
+        _activationWaitHandle.Unregister(null);
+        _trayMessageWindow.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _mainForm.Dispose();
@@ -83,6 +104,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void ShowMainForm()
     {
+        EnsureTrayIconVisible();
         _mainForm.Show();
         _mainForm.WindowState = FormWindowState.Normal;
         _mainForm.BringToFront();
@@ -101,7 +123,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void RefreshTrayTextOnUiThread()
     {
-        if (_mainForm.IsDisposed)
+        if (_isExiting || _mainForm.IsDisposed)
         {
             return;
         }
@@ -118,5 +140,96 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
 
         RefreshTrayText();
+    }
+
+    private void OnExternalActivationRequested()
+    {
+        if (_isExiting || _mainForm.IsDisposed || !_mainForm.IsHandleCreated)
+        {
+            return;
+        }
+
+        try
+        {
+            _mainForm.BeginInvoke(new Action(() =>
+            {
+                if (_isExiting || _mainForm.IsDisposed)
+                {
+                    return;
+                }
+
+                _logger.Info("收到新的启动请求，已唤回现有实例。");
+                ShowMainForm();
+            }));
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private void OnTaskbarCreated()
+    {
+        if (_isExiting || _mainForm.IsDisposed || !_mainForm.IsHandleCreated)
+        {
+            return;
+        }
+
+        try
+        {
+            _mainForm.BeginInvoke(new Action(() =>
+            {
+                if (_isExiting || _mainForm.IsDisposed)
+                {
+                    return;
+                }
+
+                _logger.Warn("检测到任务栏已重建，正在恢复托盘图标。");
+                EnsureTrayIconVisible();
+            }));
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private void EnsureTrayIconVisible()
+    {
+        _notifyIcon.Visible = false;
+        _notifyIcon.Icon = _appIcon;
+        RefreshTrayText();
+        _notifyIcon.Visible = true;
+    }
+
+    private sealed class TrayMessageWindow : NativeWindow, IDisposable
+    {
+        private readonly Action _taskbarCreatedCallback;
+        private readonly int _taskbarCreatedMessage = RegisterWindowMessage("TaskbarCreated");
+
+        public TrayMessageWindow(Action taskbarCreatedCallback)
+        {
+            _taskbarCreatedCallback = taskbarCreatedCallback;
+            CreateHandle(new CreateParams());
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == _taskbarCreatedMessage)
+            {
+                _taskbarCreatedCallback();
+            }
+
+            base.WndProc(ref m);
+        }
+
+        public void Dispose()
+        {
+            if (Handle != IntPtr.Zero)
+            {
+                DestroyHandle();
+            }
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int RegisterWindowMessage(string lpString);
     }
 }
