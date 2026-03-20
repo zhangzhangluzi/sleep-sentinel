@@ -12,15 +12,20 @@ public sealed class PowerController : IDisposable
     private const int PowerCfgTimeoutMilliseconds = 3000;
     private const int WakeTimerDisabledValue = 0;
     private const int WakeTimerEnabledValue = 1;
+    private const int StandbyConnectivityDisabledValue = 0;
+    private const int StandbyConnectivityEnabledValue = 1;
+    private const int StandbyConnectivityManagedByWindowsValue = 2;
+    private const int DisconnectedStandbyModeNormalValue = 0;
+    private const int DisconnectedStandbyModeAggressiveValue = 1;
     private const int RequestDisplayMask = 1;
     private const int RequestSystemMask = 2;
     private const int RequestAwayModeMask = 4;
     private const int FullRequestOverrideMask = RequestDisplayMask | RequestSystemMask | RequestAwayModeMask;
     private const string PowerRequestOverrideRegistryRoot = @"SYSTEM\CurrentControlSet\Control\Power\PowerRequestOverride";
-    private static readonly Regex CurrentAcWakeTimerRegex = new(
+    private static readonly Regex CurrentAcPowerSettingRegex = new(
         @"(?:Current AC Power Setting Index|当前交流电源设置索引):\s*0x(?<value>[0-9a-fA-F]+)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex CurrentDcWakeTimerRegex = new(
+    private static readonly Regex CurrentDcPowerSettingRegex = new(
         @"(?:Current DC Power Setting Index|当前直流电源设置索引):\s*0x(?<value>[0-9a-fA-F]+)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly string[] ManualWakeIndicators =
@@ -139,6 +144,14 @@ public sealed class PowerController : IDisposable
         {
             RefreshWakeTimerPolicySummary();
         }
+        if (_settings.DisableStandbyConnectivity)
+        {
+            ApplyStandbyConnectivityPolicy();
+        }
+        else
+        {
+            RefreshStandbyConnectivityPolicySummary();
+        }
         if (_settings.BlockKnownRemoteWakeRequests)
         {
             ApplyKnownRemoteWakePolicy();
@@ -200,6 +213,23 @@ public sealed class PowerController : IDisposable
         {
             RefreshWakeTimerPolicySummary();
         }
+        if (_settings.DisableStandbyConnectivity)
+        {
+            if (!previousSettings.DisableStandbyConnectivity)
+            {
+                CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
+            }
+
+            ApplyStandbyConnectivityPolicy();
+        }
+        else if (previousSettings.DisableStandbyConnectivity)
+        {
+            RestoreStandbyConnectivityPolicy();
+        }
+        else
+        {
+            RefreshStandbyConnectivityPolicySummary();
+        }
         if (_settings.BlockKnownRemoteWakeRequests)
         {
             if (!previousSettings.BlockKnownRemoteWakeRequests)
@@ -218,7 +248,7 @@ public sealed class PowerController : IDisposable
             RefreshKnownRemoteWakePolicySummary();
         }
         EnsureAutostartMatchesSettings();
-        _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，远控拦截={_settings.BlockKnownRemoteWakeRequests}。");
+        _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，远控拦截={_settings.BlockKnownRemoteWakeRequests}。");
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -280,6 +310,22 @@ public sealed class PowerController : IDisposable
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public void ReapplyStandbyConnectivityPolicy()
+    {
+        if (_settings.DisableStandbyConnectivity)
+        {
+            ApplyStandbyConnectivityPolicy();
+        }
+        else
+        {
+            RefreshStandbyConnectivityPolicySummary();
+            _settingsStore.Save(_settings);
+            _logger.Info(_settings.StandbyConnectivityPolicySummary);
+        }
+
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     public void BlockSoftwareWake()
     {
         if (_settings.DisableWakeTimers)
@@ -309,6 +355,38 @@ public sealed class PowerController : IDisposable
         var updatedSettings = _settingsStore.Load();
         updatedSettings.DisableWakeTimers = false;
         _logger.Info("已通过快捷按钮请求恢复软件/定时器唤醒策略。");
+        UpdateSettings(updatedSettings);
+    }
+
+    public void BlockStandbyConnectivityWake()
+    {
+        if (_settings.DisableStandbyConnectivity)
+        {
+            _logger.Info("待机联网拦截已启用，正在重新应用当前电源计划策略。");
+            ApplyStandbyConnectivityPolicy();
+            StateChanged?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        var updatedSettings = _settingsStore.Load();
+        updatedSettings.DisableStandbyConnectivity = true;
+        _logger.Info("已通过快捷按钮启用待机联网拦截。");
+        UpdateSettings(updatedSettings);
+    }
+
+    public void RestoreStandbyConnectivityWake()
+    {
+        if (!_settings.DisableStandbyConnectivity)
+        {
+            _logger.Info("待机联网拦截当前未启用，无需恢复。");
+            RefreshStandbyConnectivityPolicySummary();
+            StateChanged?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        var updatedSettings = _settingsStore.Load();
+        updatedSettings.DisableStandbyConnectivity = false;
+        _logger.Info("已通过快捷按钮请求恢复待机联网策略。");
         UpdateSettings(updatedSettings);
     }
 
@@ -452,6 +530,114 @@ public sealed class PowerController : IDisposable
         _settings.WakeTimerRestoreSnapshotCaptured = true;
         _settingsStore.Save(_settings);
         _logger.Info($"已记录唤醒定时器原始设置：AC={acValue}，DC={dcValue}。");
+    }
+
+    private void ApplyStandbyConnectivityPolicy()
+    {
+        var failures = SetStandbyConnectivityPolicy(
+            StandbyConnectivityDisabledValue,
+            StandbyConnectivityDisabledValue,
+            DisconnectedStandbyModeAggressiveValue,
+            DisconnectedStandbyModeAggressiveValue);
+
+        if (failures.Length == 0)
+        {
+            _settings.StandbyConnectivityPolicySummary = _settings.StandbyConnectivityRestoreSnapshotCaptured
+                ? "当前电源计划已关闭待机联网（AC/DC），并启用主动断网待机模式，可恢复到原始设置"
+                : "当前电源计划已关闭待机联网（AC/DC），并启用主动断网待机模式；历史基线缺失时将回退到 Windows 管理/正常模式";
+            _settingsStore.Save(_settings);
+            _logger.Info(_settings.StandbyConnectivityPolicySummary);
+            return;
+        }
+
+        _settings.StandbyConnectivityPolicySummary = "尝试关闭待机联网时收到输出，请检查日志";
+        _settingsStore.Save(_settings);
+        _logger.Warn($"切换待机联网策略时收到输出：{Environment.NewLine}{string.Join(Environment.NewLine, failures)}");
+    }
+
+    private void RestoreStandbyConnectivityPolicy()
+    {
+        var hadSnapshot = _settings.StandbyConnectivityRestoreSnapshotCaptured;
+        var connectivityAcValue = hadSnapshot ? _settings.StandbyConnectivityRestoreAcValue : StandbyConnectivityManagedByWindowsValue;
+        var connectivityDcValue = hadSnapshot ? _settings.StandbyConnectivityRestoreDcValue : StandbyConnectivityManagedByWindowsValue;
+        var disconnectedAcValue = hadSnapshot ? _settings.DisconnectedStandbyModeRestoreAcValue : DisconnectedStandbyModeNormalValue;
+        var disconnectedDcValue = hadSnapshot ? _settings.DisconnectedStandbyModeRestoreDcValue : DisconnectedStandbyModeNormalValue;
+        var failures = SetStandbyConnectivityPolicy(
+            connectivityAcValue,
+            connectivityDcValue,
+            disconnectedAcValue,
+            disconnectedDcValue);
+
+        if (failures.Length == 0)
+        {
+            _settings.StandbyConnectivityPolicySummary = hadSnapshot
+                ? "已恢复当前电源计划的待机联网和断网待机模式到拦截前的 AC/DC 设置"
+                : "已恢复当前电源计划的待机联网为 Windows 管理，断网待机模式为正常（缺少历史基线）";
+            ClearStandbyConnectivityRestoreSnapshot();
+            _settingsStore.Save(_settings);
+            _logger.Info(_settings.StandbyConnectivityPolicySummary);
+            return;
+        }
+
+        _settings.StandbyConnectivityPolicySummary = hadSnapshot
+            ? "尝试恢复待机联网原始设置时收到输出，请检查日志"
+            : "尝试恢复待机联网默认设置时收到输出，请检查日志";
+        _settingsStore.Save(_settings);
+        _logger.Warn($"恢复待机联网策略时收到输出：{Environment.NewLine}{string.Join(Environment.NewLine, failures)}");
+    }
+
+    private void RefreshStandbyConnectivityPolicySummary()
+    {
+        if (_settings.DisableStandbyConnectivity)
+        {
+            _settings.StandbyConnectivityPolicySummary = _settings.StandbyConnectivityRestoreSnapshotCaptured
+                ? "已配置为关闭待机联网并启用主动断网待机模式，可恢复到原始设置"
+                : "已配置为关闭待机联网并启用主动断网待机模式；历史基线缺失时将回退到 Windows 管理/正常模式";
+            _settingsStore.Save(_settings);
+            return;
+        }
+
+        if (TryGetCurrentStandbyConnectivityIndices(
+                out var connectivityAcValue,
+                out var connectivityDcValue,
+                out var disconnectedAcValue,
+                out var disconnectedDcValue))
+        {
+            _settings.StandbyConnectivityPolicySummary =
+                $"未由应用接管；系统当前待机联网：AC={DescribeStandbyConnectivityValue(connectivityAcValue)}，DC={DescribeStandbyConnectivityValue(connectivityDcValue)}；断网待机模式：AC={DescribeDisconnectedStandbyModeValue(disconnectedAcValue)}，DC={DescribeDisconnectedStandbyModeValue(disconnectedDcValue)}";
+        }
+        else
+        {
+            _settings.StandbyConnectivityPolicySummary = "未由应用接管；保留系统当前待机联网策略";
+        }
+
+        _settingsStore.Save(_settings);
+    }
+
+    private void CaptureStandbyConnectivityRestoreSnapshotIfNeeded()
+    {
+        if (_settings.StandbyConnectivityRestoreSnapshotCaptured)
+        {
+            return;
+        }
+
+        if (!TryGetCurrentStandbyConnectivityIndices(
+                out var connectivityAcValue,
+                out var connectivityDcValue,
+                out var disconnectedAcValue,
+                out var disconnectedDcValue))
+        {
+            _logger.Warn("未能记录待机联网原始 AC/DC 设置；恢复时将回退到 Windows 管理/正常模式。");
+            return;
+        }
+
+        _settings.StandbyConnectivityRestoreAcValue = connectivityAcValue;
+        _settings.StandbyConnectivityRestoreDcValue = connectivityDcValue;
+        _settings.DisconnectedStandbyModeRestoreAcValue = disconnectedAcValue;
+        _settings.DisconnectedStandbyModeRestoreDcValue = disconnectedDcValue;
+        _settings.StandbyConnectivityRestoreSnapshotCaptured = true;
+        _settingsStore.Save(_settings);
+        _logger.Info($"已记录待机联网原始设置：联网 AC={connectivityAcValue}，DC={connectivityDcValue}；断网待机 AC={disconnectedAcValue}，DC={disconnectedDcValue}。");
     }
 
     private void ApplyKnownRemoteWakePolicy()
@@ -850,6 +1036,19 @@ public sealed class PowerController : IDisposable
         return values.Any(source.Contains);
     }
 
+    private string[] SetStandbyConnectivityPolicy(int connectivityAcValue, int connectivityDcValue, int disconnectedAcValue, int disconnectedDcValue)
+    {
+        var acConnectivityResult = RunPowerCfg($"/setacvalueindex scheme_current sub_none connectivityinstandby {connectivityAcValue}");
+        var dcConnectivityResult = RunPowerCfg($"/setdcvalueindex scheme_current sub_none connectivityinstandby {connectivityDcValue}");
+        var acDisconnectedResult = RunPowerCfg($"/setacvalueindex scheme_current sub_none disconnectedstandbymode {disconnectedAcValue}");
+        var dcDisconnectedResult = RunPowerCfg($"/setdcvalueindex scheme_current sub_none disconnectedstandbymode {disconnectedDcValue}");
+        var activateResult = RunPowerCfg("/setactive scheme_current");
+
+        return new[] { acConnectivityResult, dcConnectivityResult, acDisconnectedResult, dcDisconnectedResult, activateResult }
+            .Where(static x => !string.IsNullOrWhiteSpace(x))
+            .ToArray();
+    }
+
     private string[] SetWakeTimerPolicy(int acValue, int dcValue)
     {
         var acResult = RunPowerCfg($"/setacvalueindex scheme_current sub_sleep rtcwake {acValue}");
@@ -872,11 +1071,32 @@ public sealed class PowerController : IDisposable
             return false;
         }
 
-        return TryParseWakeTimerIndex(output, CurrentAcWakeTimerRegex, out acValue)
-            && TryParseWakeTimerIndex(output, CurrentDcWakeTimerRegex, out dcValue);
+        return TryParsePowerSettingIndex(output, CurrentAcPowerSettingRegex, WakeTimerEnabledValue, out acValue)
+            && TryParsePowerSettingIndex(output, CurrentDcPowerSettingRegex, WakeTimerEnabledValue, out dcValue);
     }
 
-    private static bool TryParseWakeTimerIndex(string output, Regex regex, out int value)
+    private bool TryGetCurrentStandbyConnectivityIndices(out int connectivityAcValue, out int connectivityDcValue, out int disconnectedAcValue, out int disconnectedDcValue)
+    {
+        connectivityAcValue = StandbyConnectivityManagedByWindowsValue;
+        connectivityDcValue = StandbyConnectivityManagedByWindowsValue;
+        disconnectedAcValue = DisconnectedStandbyModeNormalValue;
+        disconnectedDcValue = DisconnectedStandbyModeNormalValue;
+
+        var connectivityOutput = RunPowerCfg("/q scheme_current sub_none connectivityinstandby");
+        var disconnectedOutput = RunPowerCfg("/q scheme_current sub_none disconnectedstandbymode");
+
+        if (string.IsNullOrWhiteSpace(connectivityOutput) || string.IsNullOrWhiteSpace(disconnectedOutput))
+        {
+            return false;
+        }
+
+        return TryParsePowerSettingIndex(connectivityOutput, CurrentAcPowerSettingRegex, StandbyConnectivityManagedByWindowsValue, out connectivityAcValue)
+            && TryParsePowerSettingIndex(connectivityOutput, CurrentDcPowerSettingRegex, StandbyConnectivityManagedByWindowsValue, out connectivityDcValue)
+            && TryParsePowerSettingIndex(disconnectedOutput, CurrentAcPowerSettingRegex, DisconnectedStandbyModeNormalValue, out disconnectedAcValue)
+            && TryParsePowerSettingIndex(disconnectedOutput, CurrentDcPowerSettingRegex, DisconnectedStandbyModeNormalValue, out disconnectedDcValue);
+    }
+
+    private static bool TryParsePowerSettingIndex(string output, Regex regex, int fallbackValue, out int value)
     {
         var match = regex.Match(output);
         if (match.Success
@@ -885,7 +1105,7 @@ public sealed class PowerController : IDisposable
             return true;
         }
 
-        value = WakeTimerEnabledValue;
+        value = fallbackValue;
         return false;
     }
 
@@ -951,10 +1171,40 @@ public sealed class PowerController : IDisposable
         _settings.WakeTimerRestoreDcValue = 0;
     }
 
+    private void ClearStandbyConnectivityRestoreSnapshot()
+    {
+        _settings.StandbyConnectivityRestoreSnapshotCaptured = false;
+        _settings.StandbyConnectivityRestoreAcValue = 0;
+        _settings.StandbyConnectivityRestoreDcValue = 0;
+        _settings.DisconnectedStandbyModeRestoreAcValue = 0;
+        _settings.DisconnectedStandbyModeRestoreDcValue = 0;
+    }
+
     private void ClearKnownRemoteWakeRestoreSnapshot()
     {
         _settings.KnownRemoteWakeRequestBackupCaptured = false;
         _settings.KnownRemoteWakeRequestOverrideBackup = [];
+    }
+
+    private static string DescribeStandbyConnectivityValue(int value)
+    {
+        return value switch
+        {
+            StandbyConnectivityDisabledValue => "禁用",
+            StandbyConnectivityEnabledValue => "启用",
+            StandbyConnectivityManagedByWindowsValue => "由 Windows 管理",
+            _ => $"未知({value})"
+        };
+    }
+
+    private static string DescribeDisconnectedStandbyModeValue(int value)
+    {
+        return value switch
+        {
+            DisconnectedStandbyModeNormalValue => "正常",
+            DisconnectedStandbyModeAggressiveValue => "主动",
+            _ => $"未知({value})"
+        };
     }
 
     private bool TryGetRequestOverrideValue(PowerRequestOverrideEntry entry, out int value)

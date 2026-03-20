@@ -15,11 +15,13 @@ public sealed class MainForm : Form
     private readonly NumericUpDown _resumeDelayInput;
     private readonly CheckBox _onlyUnattendedWakeCheckbox;
     private readonly CheckBox _disableWakeTimersCheckbox;
+    private readonly CheckBox _disableStandbyConnectivityCheckbox;
     private readonly CheckBox _blockKnownRemoteWakeCheckbox;
     private readonly CheckBox _startMinimizedCheckbox;
     private readonly CheckBox _autostartCheckbox;
     private readonly Label _statusLabel;
     private readonly Label _wakeTimerQuickStateLabel;
+    private readonly Label _standbyConnectivityQuickStateLabel;
     private readonly Label _remoteWakeQuickStateLabel;
     private readonly TextBox _logTextBox;
     private readonly EventHandler _stateChangedHandler;
@@ -121,6 +123,31 @@ public sealed class MainForm : Form
             UpdateStatus();
             LoadLogs();
         };
+        _disableStandbyConnectivityCheckbox = new CheckBox
+        {
+            AutoSize = true,
+            Text = "关闭待机状态下的网络连接（AC/DC，减少 Windows Update/更新协调器在合盖待机时拉活）"
+        };
+        _disableStandbyConnectivityCheckbox.CheckedChanged += (_, _) =>
+        {
+            if (_suppressInteractiveToggleEvents)
+            {
+                return;
+            }
+
+            if (_disableStandbyConnectivityCheckbox.Checked)
+            {
+                _controller.BlockStandbyConnectivityWake();
+            }
+            else
+            {
+                _controller.RestoreStandbyConnectivityWake();
+            }
+
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
         _blockKnownRemoteWakeCheckbox = new CheckBox
         {
             AutoSize = true,
@@ -176,6 +203,21 @@ public sealed class MainForm : Form
         wakeTimerActions.Controls.Add(_wakeTimerQuickStateLabel);
         AddSettingRow(settingsPanel, 4, "软件唤醒", wakeTimerActions);
 
+        var standbyConnectivityActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
+        var reapplyStandbyConnectivityButton = new Button { Text = "重新应用", AutoSize = true };
+        reapplyStandbyConnectivityButton.Click += (_, _) =>
+        {
+            _controller.ReapplyStandbyConnectivityPolicy();
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
+        _standbyConnectivityQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
+        standbyConnectivityActions.Controls.Add(_disableStandbyConnectivityCheckbox);
+        standbyConnectivityActions.Controls.Add(reapplyStandbyConnectivityButton);
+        standbyConnectivityActions.Controls.Add(_standbyConnectivityQuickStateLabel);
+        AddSettingRow(settingsPanel, 5, "待机联网", standbyConnectivityActions);
+
         var remoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
         var reapplyRemoteWakeButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyRemoteWakeButton.Click += (_, _) =>
@@ -189,12 +231,12 @@ public sealed class MainForm : Form
         remoteWakeActions.Controls.Add(_blockKnownRemoteWakeCheckbox);
         remoteWakeActions.Controls.Add(reapplyRemoteWakeButton);
         remoteWakeActions.Controls.Add(_remoteWakeQuickStateLabel);
-        AddSettingRow(settingsPanel, 5, "远控拦截", remoteWakeActions);
+        AddSettingRow(settingsPanel, 6, "远控拦截", remoteWakeActions);
 
         var startupFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
         startupFlow.Controls.Add(_startMinimizedCheckbox);
         startupFlow.Controls.Add(_autostartCheckbox);
-        AddSettingRow(settingsPanel, 6, "启动行为", startupFlow);
+        AddSettingRow(settingsPanel, 7, "启动行为", startupFlow);
 
         root.Controls.Add(settingsPanel);
 
@@ -324,6 +366,7 @@ public sealed class MainForm : Form
             _startMinimizedCheckbox.Checked = settings.StartMinimized;
             _autostartCheckbox.Checked = settings.StartWithWindows;
             _disableWakeTimersCheckbox.Checked = settings.DisableWakeTimers;
+            _disableStandbyConnectivityCheckbox.Checked = settings.DisableStandbyConnectivity;
             _blockKnownRemoteWakeCheckbox.Checked = settings.BlockKnownRemoteWakeRequests;
         }
         finally
@@ -332,6 +375,7 @@ public sealed class MainForm : Form
         }
 
         _wakeTimerQuickStateLabel.Text = settings.DisableWakeTimers ? "当前：已拦截" : "当前：未接管";
+        _standbyConnectivityQuickStateLabel.Text = settings.DisableStandbyConnectivity ? "当前：已拦截" : "当前：未接管";
         _remoteWakeQuickStateLabel.Text = settings.BlockKnownRemoteWakeRequests ? "当前：已拦截" : "当前：未接管";
     }
 
@@ -354,6 +398,7 @@ public sealed class MainForm : Form
             $"保护规则：{_controller.CurrentProtectionRuleSummary}{Environment.NewLine}" +
             $"最近一次唤醒判定：{settings.LastWakeSummary}{Environment.NewLine}" +
             $"唤醒定时器策略：{settings.WakeTimerPolicySummary}{Environment.NewLine}" +
+            $"待机联网策略：{settings.StandbyConnectivityPolicySummary}{Environment.NewLine}" +
             $"远控拦截策略：{settings.KnownRemoteWakePolicySummary}{Environment.NewLine}" +
             $"配置文件：{_settingsStore.SettingsPath}{Environment.NewLine}" +
             $"日志目录：{_logger.LogDirectory}{Environment.NewLine}" +

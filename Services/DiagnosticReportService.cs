@@ -42,6 +42,13 @@ public sealed class DiagnosticReportService
         builder.AppendLine($"WakeTimerRestoreAcValue: {settings.WakeTimerRestoreAcValue}");
         builder.AppendLine($"WakeTimerRestoreDcValue: {settings.WakeTimerRestoreDcValue}");
         builder.AppendLine($"WakeTimerPolicySummary: {settings.WakeTimerPolicySummary}");
+        builder.AppendLine($"DisableStandbyConnectivity: {settings.DisableStandbyConnectivity}");
+        builder.AppendLine($"StandbyConnectivityRestoreSnapshotCaptured: {settings.StandbyConnectivityRestoreSnapshotCaptured}");
+        builder.AppendLine($"StandbyConnectivityRestoreAcValue: {settings.StandbyConnectivityRestoreAcValue}");
+        builder.AppendLine($"StandbyConnectivityRestoreDcValue: {settings.StandbyConnectivityRestoreDcValue}");
+        builder.AppendLine($"DisconnectedStandbyModeRestoreAcValue: {settings.DisconnectedStandbyModeRestoreAcValue}");
+        builder.AppendLine($"DisconnectedStandbyModeRestoreDcValue: {settings.DisconnectedStandbyModeRestoreDcValue}");
+        builder.AppendLine($"StandbyConnectivityPolicySummary: {settings.StandbyConnectivityPolicySummary}");
         builder.AppendLine($"BlockKnownRemoteWakeRequests: {settings.BlockKnownRemoteWakeRequests}");
         builder.AppendLine($"KnownRemoteWakeRequestBackupCaptured: {settings.KnownRemoteWakeRequestBackupCaptured}");
         builder.AppendLine($"KnownRemoteWakeRequestOverrideBackupCount: {settings.KnownRemoteWakeRequestOverrideBackup.Count}");
