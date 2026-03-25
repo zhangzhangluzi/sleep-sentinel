@@ -16,12 +16,14 @@ public sealed class MainForm : Form
     private readonly CheckBox _onlyUnattendedWakeCheckbox;
     private readonly CheckBox _disableWakeTimersCheckbox;
     private readonly CheckBox _disableStandbyConnectivityCheckbox;
+    private readonly CheckBox _enforceBatteryStandbyHibernateCheckbox;
     private readonly CheckBox _blockKnownRemoteWakeCheckbox;
     private readonly CheckBox _startMinimizedCheckbox;
     private readonly CheckBox _autostartCheckbox;
     private readonly Label _statusLabel;
     private readonly Label _wakeTimerQuickStateLabel;
     private readonly Label _standbyConnectivityQuickStateLabel;
+    private readonly Label _batteryStandbyHibernateQuickStateLabel;
     private readonly Label _remoteWakeQuickStateLabel;
     private readonly TextBox _logTextBox;
     private readonly EventHandler _stateChangedHandler;
@@ -148,6 +150,31 @@ public sealed class MainForm : Form
             UpdateStatus();
             LoadLogs();
         };
+        _enforceBatteryStandbyHibernateCheckbox = new CheckBox
+        {
+            AutoSize = true,
+            Text = "电池供电下在待机 10 分钟后自动转入休眠（仅 DC，防止合盖后一夜耗尽）"
+        };
+        _enforceBatteryStandbyHibernateCheckbox.CheckedChanged += (_, _) =>
+        {
+            if (_suppressInteractiveToggleEvents)
+            {
+                return;
+            }
+
+            if (_enforceBatteryStandbyHibernateCheckbox.Checked)
+            {
+                _controller.EnableBatteryStandbyHibernateFallback();
+            }
+            else
+            {
+                _controller.RestoreBatteryStandbyHibernateFallback();
+            }
+
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
         _blockKnownRemoteWakeCheckbox = new CheckBox
         {
             AutoSize = true,
@@ -218,6 +245,21 @@ public sealed class MainForm : Form
         standbyConnectivityActions.Controls.Add(_standbyConnectivityQuickStateLabel);
         AddSettingRow(settingsPanel, 5, "待机联网", standbyConnectivityActions);
 
+        var batteryStandbyHibernateActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
+        var reapplyBatteryStandbyHibernateButton = new Button { Text = "重新应用", AutoSize = true };
+        reapplyBatteryStandbyHibernateButton.Click += (_, _) =>
+        {
+            _controller.ReapplyBatteryStandbyHibernatePolicy();
+            ApplySettingsToUi(_controller.CurrentSettings);
+            UpdateStatus();
+            LoadLogs();
+        };
+        _batteryStandbyHibernateQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
+        batteryStandbyHibernateActions.Controls.Add(_enforceBatteryStandbyHibernateCheckbox);
+        batteryStandbyHibernateActions.Controls.Add(reapplyBatteryStandbyHibernateButton);
+        batteryStandbyHibernateActions.Controls.Add(_batteryStandbyHibernateQuickStateLabel);
+        AddSettingRow(settingsPanel, 6, "电池兜底", batteryStandbyHibernateActions);
+
         var remoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
         var reapplyRemoteWakeButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyRemoteWakeButton.Click += (_, _) =>
@@ -231,12 +273,12 @@ public sealed class MainForm : Form
         remoteWakeActions.Controls.Add(_blockKnownRemoteWakeCheckbox);
         remoteWakeActions.Controls.Add(reapplyRemoteWakeButton);
         remoteWakeActions.Controls.Add(_remoteWakeQuickStateLabel);
-        AddSettingRow(settingsPanel, 6, "远控拦截", remoteWakeActions);
+        AddSettingRow(settingsPanel, 7, "远控拦截", remoteWakeActions);
 
         var startupFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
         startupFlow.Controls.Add(_startMinimizedCheckbox);
         startupFlow.Controls.Add(_autostartCheckbox);
-        AddSettingRow(settingsPanel, 7, "启动行为", startupFlow);
+        AddSettingRow(settingsPanel, 8, "启动行为", startupFlow);
 
         root.Controls.Add(settingsPanel);
 
@@ -367,6 +409,7 @@ public sealed class MainForm : Form
             _autostartCheckbox.Checked = settings.StartWithWindows;
             _disableWakeTimersCheckbox.Checked = settings.DisableWakeTimers;
             _disableStandbyConnectivityCheckbox.Checked = settings.DisableStandbyConnectivity;
+            _enforceBatteryStandbyHibernateCheckbox.Checked = settings.EnforceBatteryStandbyHibernate;
             _blockKnownRemoteWakeCheckbox.Checked = settings.BlockKnownRemoteWakeRequests;
         }
         finally
@@ -376,6 +419,7 @@ public sealed class MainForm : Form
 
         _wakeTimerQuickStateLabel.Text = settings.DisableWakeTimers ? "当前：已拦截" : "当前：未接管";
         _standbyConnectivityQuickStateLabel.Text = settings.DisableStandbyConnectivity ? "当前：已拦截" : "当前：未接管";
+        _batteryStandbyHibernateQuickStateLabel.Text = settings.EnforceBatteryStandbyHibernate ? "当前：已兜底" : "当前：未接管";
         _remoteWakeQuickStateLabel.Text = settings.BlockKnownRemoteWakeRequests ? "当前：已拦截" : "当前：未接管";
     }
 
@@ -399,6 +443,7 @@ public sealed class MainForm : Form
             $"最近一次唤醒判定：{settings.LastWakeSummary}{Environment.NewLine}" +
             $"唤醒定时器策略：{settings.WakeTimerPolicySummary}{Environment.NewLine}" +
             $"待机联网策略：{settings.StandbyConnectivityPolicySummary}{Environment.NewLine}" +
+            $"电池兜底策略：{settings.BatteryStandbyHibernatePolicySummary}{Environment.NewLine}" +
             $"远控拦截策略：{settings.KnownRemoteWakePolicySummary}{Environment.NewLine}" +
             $"配置文件：{_settingsStore.SettingsPath}{Environment.NewLine}" +
             $"日志目录：{_logger.LogDirectory}{Environment.NewLine}" +

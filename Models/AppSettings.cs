@@ -8,6 +8,7 @@ public sealed class AppSettings
     public bool ResumeProtectionOnlyForUnattendedWake { get; set; } = true;
     public bool DisableWakeTimers { get; set; }
     public bool DisableStandbyConnectivity { get; set; }
+    public bool EnforceBatteryStandbyHibernate { get; set; }
     public bool BlockKnownRemoteWakeRequests { get; set; }
     public bool WakeTimerRestoreSnapshotCaptured { get; set; }
     public int WakeTimerRestoreAcValue { get; set; }
@@ -17,6 +18,9 @@ public sealed class AppSettings
     public int StandbyConnectivityRestoreDcValue { get; set; }
     public int DisconnectedStandbyModeRestoreAcValue { get; set; }
     public int DisconnectedStandbyModeRestoreDcValue { get; set; }
+    public bool BatteryStandbyHibernateRestoreSnapshotCaptured { get; set; }
+    public int BatteryStandbyHibernateRestoreAcValue { get; set; }
+    public int BatteryStandbyHibernateRestoreDcValue { get; set; }
     public bool KnownRemoteWakeRequestBackupCaptured { get; set; }
     public Dictionary<string, int> KnownRemoteWakeRequestOverrideBackup { get; set; } = [];
     public int ResumeProtectionDelaySeconds { get; set; } = 8;
@@ -27,5 +31,6 @@ public sealed class AppSettings
     public string LastWakeSummary { get; set; } = "无";
     public string WakeTimerPolicySummary { get; set; } = "未检查";
     public string StandbyConnectivityPolicySummary { get; set; } = "未检查";
+    public string BatteryStandbyHibernatePolicySummary { get; set; } = "未检查";
     public string KnownRemoteWakePolicySummary { get; set; } = "未检查";
 }

@@ -17,6 +17,9 @@ public sealed class PowerController : IDisposable
     private const int StandbyConnectivityManagedByWindowsValue = 2;
     private const int DisconnectedStandbyModeNormalValue = 0;
     private const int DisconnectedStandbyModeAggressiveValue = 1;
+    private const int HibernateAfterStandbyDisabledValue = 0;
+    private const int HibernateAfterStandbyFallbackRestoreDcValue = int.MaxValue;
+    private const int BatteryStandbyHibernateTimeoutSeconds = 600;
     private const int RequestDisplayMask = 1;
     private const int RequestSystemMask = 2;
     private const int RequestAwayModeMask = 4;
@@ -152,6 +155,19 @@ public sealed class PowerController : IDisposable
         {
             RefreshStandbyConnectivityPolicySummary();
         }
+        if (_settings.EnforceBatteryStandbyHibernate)
+        {
+            if (!_settings.BatteryStandbyHibernateRestoreSnapshotCaptured)
+            {
+                CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
+            }
+
+            ApplyBatteryStandbyHibernatePolicy();
+        }
+        else
+        {
+            RefreshBatteryStandbyHibernatePolicySummary();
+        }
         if (_settings.BlockKnownRemoteWakeRequests)
         {
             ApplyKnownRemoteWakePolicy();
@@ -230,6 +246,23 @@ public sealed class PowerController : IDisposable
         {
             RefreshStandbyConnectivityPolicySummary();
         }
+        if (_settings.EnforceBatteryStandbyHibernate)
+        {
+            if (!previousSettings.EnforceBatteryStandbyHibernate)
+            {
+                CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
+            }
+
+            ApplyBatteryStandbyHibernatePolicy();
+        }
+        else if (previousSettings.EnforceBatteryStandbyHibernate)
+        {
+            RestoreBatteryStandbyHibernatePolicy();
+        }
+        else
+        {
+            RefreshBatteryStandbyHibernatePolicySummary();
+        }
         if (_settings.BlockKnownRemoteWakeRequests)
         {
             if (!previousSettings.BlockKnownRemoteWakeRequests)
@@ -248,7 +281,7 @@ public sealed class PowerController : IDisposable
             RefreshKnownRemoteWakePolicySummary();
         }
         EnsureAutostartMatchesSettings();
-        _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，远控拦截={_settings.BlockKnownRemoteWakeRequests}。");
+        _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，电池兜底休眠={_settings.EnforceBatteryStandbyHibernate}，远控拦截={_settings.BlockKnownRemoteWakeRequests}。");
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -326,6 +359,22 @@ public sealed class PowerController : IDisposable
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public void ReapplyBatteryStandbyHibernatePolicy()
+    {
+        if (_settings.EnforceBatteryStandbyHibernate)
+        {
+            ApplyBatteryStandbyHibernatePolicy();
+        }
+        else
+        {
+            RefreshBatteryStandbyHibernatePolicySummary();
+            _settingsStore.Save(_settings);
+            _logger.Info(_settings.BatteryStandbyHibernatePolicySummary);
+        }
+
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     public void BlockSoftwareWake()
     {
         if (_settings.DisableWakeTimers)
@@ -387,6 +436,38 @@ public sealed class PowerController : IDisposable
         var updatedSettings = _settingsStore.Load();
         updatedSettings.DisableStandbyConnectivity = false;
         _logger.Info("已通过快捷按钮请求恢复待机联网策略。");
+        UpdateSettings(updatedSettings);
+    }
+
+    public void EnableBatteryStandbyHibernateFallback()
+    {
+        if (_settings.EnforceBatteryStandbyHibernate)
+        {
+            _logger.Info("电池兜底休眠已启用，正在重新应用当前电源计划策略。");
+            ApplyBatteryStandbyHibernatePolicy();
+            StateChanged?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        var updatedSettings = _settingsStore.Load();
+        updatedSettings.EnforceBatteryStandbyHibernate = true;
+        _logger.Info("已通过快捷按钮启用电池待机兜底休眠。");
+        UpdateSettings(updatedSettings);
+    }
+
+    public void RestoreBatteryStandbyHibernateFallback()
+    {
+        if (!_settings.EnforceBatteryStandbyHibernate)
+        {
+            _logger.Info("电池兜底休眠当前未启用，无需恢复。");
+            RefreshBatteryStandbyHibernatePolicySummary();
+            StateChanged?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        var updatedSettings = _settingsStore.Load();
+        updatedSettings.EnforceBatteryStandbyHibernate = false;
+        _logger.Info("已通过快捷按钮请求恢复电池待机休眠策略。");
         UpdateSettings(updatedSettings);
     }
 
@@ -638,6 +719,103 @@ public sealed class PowerController : IDisposable
         _settings.StandbyConnectivityRestoreSnapshotCaptured = true;
         _settingsStore.Save(_settings);
         _logger.Info($"已记录待机联网原始设置：联网 AC={connectivityAcValue}，DC={connectivityDcValue}；断网待机 AC={disconnectedAcValue}，DC={disconnectedDcValue}。");
+    }
+
+    private void ApplyBatteryStandbyHibernatePolicy()
+    {
+        var acValue = _settings.BatteryStandbyHibernateRestoreSnapshotCaptured
+            ? _settings.BatteryStandbyHibernateRestoreAcValue
+            : TryGetCurrentHibernateAfterStandbyIndices(out var currentAcValue, out _)
+                ? currentAcValue
+                : HibernateAfterStandbyDisabledValue;
+        var failures = SetHibernateAfterStandbyPolicy(acValue, BatteryStandbyHibernateTimeoutSeconds);
+
+        if (failures.Length == 0)
+        {
+            _settings.BatteryStandbyHibernatePolicySummary = _settings.BatteryStandbyHibernateRestoreSnapshotCaptured
+                ? $"当前电源计划已配置为电池待机 {DescribePowerSettingDuration(BatteryStandbyHibernateTimeoutSeconds)}后自动休眠（DC，可恢复到原始设置）"
+                : $"当前电源计划已配置为电池待机 {DescribePowerSettingDuration(BatteryStandbyHibernateTimeoutSeconds)}后自动休眠（DC，历史基线缺失时将回退到永不休眠）";
+            _settingsStore.Save(_settings);
+            _logger.Info(_settings.BatteryStandbyHibernatePolicySummary);
+            return;
+        }
+
+        _settings.BatteryStandbyHibernatePolicySummary = "尝试配置电池待机兜底休眠时收到输出，请检查日志";
+        _settingsStore.Save(_settings);
+        _logger.Warn($"切换电池待机休眠策略时收到输出：{Environment.NewLine}{string.Join(Environment.NewLine, failures)}");
+    }
+
+    private void RestoreBatteryStandbyHibernatePolicy()
+    {
+        var hadSnapshot = _settings.BatteryStandbyHibernateRestoreSnapshotCaptured;
+        var acValue = hadSnapshot
+            ? _settings.BatteryStandbyHibernateRestoreAcValue
+            : TryGetCurrentHibernateAfterStandbyIndices(out var currentAcValue, out _)
+                ? currentAcValue
+                : HibernateAfterStandbyDisabledValue;
+        var dcValue = hadSnapshot ? _settings.BatteryStandbyHibernateRestoreDcValue : HibernateAfterStandbyFallbackRestoreDcValue;
+        var failures = SetHibernateAfterStandbyPolicy(acValue, dcValue);
+
+        if (failures.Length == 0)
+        {
+            _settings.BatteryStandbyHibernatePolicySummary = hadSnapshot
+                ? "已恢复当前电源计划的待机后休眠时间到拦截前的 AC/DC 设置"
+                : "已恢复当前电源计划的电池待机后休眠为永不（缺少历史基线）";
+            ClearBatteryStandbyHibernateRestoreSnapshot();
+            _settingsStore.Save(_settings);
+            _logger.Info(_settings.BatteryStandbyHibernatePolicySummary);
+            return;
+        }
+
+        _settings.BatteryStandbyHibernatePolicySummary = hadSnapshot
+            ? "尝试恢复待机后休眠原始设置时收到输出，请检查日志"
+            : "尝试恢复电池待机后休眠默认设置时收到输出，请检查日志";
+        _settingsStore.Save(_settings);
+        _logger.Warn($"恢复电池待机休眠策略时收到输出：{Environment.NewLine}{string.Join(Environment.NewLine, failures)}");
+    }
+
+    private void RefreshBatteryStandbyHibernatePolicySummary()
+    {
+        if (_settings.EnforceBatteryStandbyHibernate)
+        {
+            _settings.BatteryStandbyHibernatePolicySummary = _settings.BatteryStandbyHibernateRestoreSnapshotCaptured
+                ? $"已配置为电池待机 {DescribePowerSettingDuration(BatteryStandbyHibernateTimeoutSeconds)}后自动休眠（DC），可恢复到原始设置"
+                : $"已配置为电池待机 {DescribePowerSettingDuration(BatteryStandbyHibernateTimeoutSeconds)}后自动休眠（DC）；历史基线缺失时将回退到永不休眠";
+            _settingsStore.Save(_settings);
+            return;
+        }
+
+        if (TryGetCurrentHibernateAfterStandbyIndices(out var acValue, out var dcValue))
+        {
+            _settings.BatteryStandbyHibernatePolicySummary =
+                $"未由应用接管；系统当前待机后休眠：AC={DescribePowerSettingDuration(acValue)}，DC={DescribePowerSettingDuration(dcValue)}";
+        }
+        else
+        {
+            _settings.BatteryStandbyHibernatePolicySummary = "未由应用接管；保留系统当前待机后休眠策略";
+        }
+
+        _settingsStore.Save(_settings);
+    }
+
+    private void CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded()
+    {
+        if (_settings.BatteryStandbyHibernateRestoreSnapshotCaptured)
+        {
+            return;
+        }
+
+        if (!TryGetCurrentHibernateAfterStandbyIndices(out var acValue, out var dcValue))
+        {
+            _logger.Warn("未能记录待机后休眠原始 AC/DC 设置；恢复时将回退到电池永不休眠。");
+            return;
+        }
+
+        _settings.BatteryStandbyHibernateRestoreAcValue = acValue;
+        _settings.BatteryStandbyHibernateRestoreDcValue = dcValue;
+        _settings.BatteryStandbyHibernateRestoreSnapshotCaptured = true;
+        _settingsStore.Save(_settings);
+        _logger.Info($"已记录待机后休眠原始设置：AC={acValue}，DC={dcValue}。");
     }
 
     private void ApplyKnownRemoteWakePolicy()
@@ -1060,6 +1238,17 @@ public sealed class PowerController : IDisposable
             .ToArray();
     }
 
+    private string[] SetHibernateAfterStandbyPolicy(int acValue, int dcValue)
+    {
+        var acResult = RunPowerCfg($"/setacvalueindex scheme_current sub_sleep hibernateidle {acValue}");
+        var dcResult = RunPowerCfg($"/setdcvalueindex scheme_current sub_sleep hibernateidle {dcValue}");
+        var activateResult = RunPowerCfg("/setactive scheme_current");
+
+        return new[] { acResult, dcResult, activateResult }
+            .Where(static x => !string.IsNullOrWhiteSpace(x))
+            .ToArray();
+    }
+
     private bool TryGetCurrentWakeTimerIndices(out int acValue, out int dcValue)
     {
         acValue = WakeTimerEnabledValue;
@@ -1073,6 +1262,21 @@ public sealed class PowerController : IDisposable
 
         return TryParsePowerSettingIndex(output, CurrentAcPowerSettingRegex, WakeTimerEnabledValue, out acValue)
             && TryParsePowerSettingIndex(output, CurrentDcPowerSettingRegex, WakeTimerEnabledValue, out dcValue);
+    }
+
+    private bool TryGetCurrentHibernateAfterStandbyIndices(out int acValue, out int dcValue)
+    {
+        acValue = HibernateAfterStandbyDisabledValue;
+        dcValue = HibernateAfterStandbyFallbackRestoreDcValue;
+
+        var output = RunPowerCfg("/q scheme_current sub_sleep hibernateidle");
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            return false;
+        }
+
+        return TryParsePowerSettingIndex(output, CurrentAcPowerSettingRegex, HibernateAfterStandbyDisabledValue, out acValue)
+            && TryParsePowerSettingIndex(output, CurrentDcPowerSettingRegex, HibernateAfterStandbyFallbackRestoreDcValue, out dcValue);
     }
 
     private bool TryGetCurrentStandbyConnectivityIndices(out int connectivityAcValue, out int connectivityDcValue, out int disconnectedAcValue, out int disconnectedDcValue)
@@ -1180,6 +1384,13 @@ public sealed class PowerController : IDisposable
         _settings.DisconnectedStandbyModeRestoreDcValue = 0;
     }
 
+    private void ClearBatteryStandbyHibernateRestoreSnapshot()
+    {
+        _settings.BatteryStandbyHibernateRestoreSnapshotCaptured = false;
+        _settings.BatteryStandbyHibernateRestoreAcValue = 0;
+        _settings.BatteryStandbyHibernateRestoreDcValue = 0;
+    }
+
     private void ClearKnownRemoteWakeRestoreSnapshot()
     {
         _settings.KnownRemoteWakeRequestBackupCaptured = false;
@@ -1205,6 +1416,26 @@ public sealed class PowerController : IDisposable
             DisconnectedStandbyModeAggressiveValue => "主动",
             _ => $"未知({value})"
         };
+    }
+
+    private static string DescribePowerSettingDuration(int value)
+    {
+        if (value <= 0 || value == int.MaxValue)
+        {
+            return "永不";
+        }
+
+        if (value % 3600 == 0)
+        {
+            return $"{value / 3600} 小时";
+        }
+
+        if (value % 60 == 0)
+        {
+            return $"{value / 60} 分钟";
+        }
+
+        return $"{value} 秒";
     }
 
     private bool TryGetRequestOverrideValue(PowerRequestOverrideEntry entry, out int value)

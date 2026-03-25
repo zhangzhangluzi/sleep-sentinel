@@ -49,6 +49,11 @@ public sealed class DiagnosticReportService
         builder.AppendLine($"DisconnectedStandbyModeRestoreAcValue: {settings.DisconnectedStandbyModeRestoreAcValue}");
         builder.AppendLine($"DisconnectedStandbyModeRestoreDcValue: {settings.DisconnectedStandbyModeRestoreDcValue}");
         builder.AppendLine($"StandbyConnectivityPolicySummary: {settings.StandbyConnectivityPolicySummary}");
+        builder.AppendLine($"EnforceBatteryStandbyHibernate: {settings.EnforceBatteryStandbyHibernate}");
+        builder.AppendLine($"BatteryStandbyHibernateRestoreSnapshotCaptured: {settings.BatteryStandbyHibernateRestoreSnapshotCaptured}");
+        builder.AppendLine($"BatteryStandbyHibernateRestoreAcValue: {settings.BatteryStandbyHibernateRestoreAcValue}");
+        builder.AppendLine($"BatteryStandbyHibernateRestoreDcValue: {settings.BatteryStandbyHibernateRestoreDcValue}");
+        builder.AppendLine($"BatteryStandbyHibernatePolicySummary: {settings.BatteryStandbyHibernatePolicySummary}");
         builder.AppendLine($"BlockKnownRemoteWakeRequests: {settings.BlockKnownRemoteWakeRequests}");
         builder.AppendLine($"KnownRemoteWakeRequestBackupCaptured: {settings.KnownRemoteWakeRequestBackupCaptured}");
         builder.AppendLine($"KnownRemoteWakeRequestOverrideBackupCount: {settings.KnownRemoteWakeRequestOverrideBackup.Count}");
