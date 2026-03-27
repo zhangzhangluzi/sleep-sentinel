@@ -17,7 +17,9 @@ public sealed class MainForm : Form
     private readonly CheckBox _disableWakeTimersCheckbox;
     private readonly CheckBox _disableStandbyConnectivityCheckbox;
     private readonly CheckBox _enforceBatteryStandbyHibernateCheckbox;
+    private readonly NumericUpDown _batteryStandbyHibernateTimeoutInput;
     private readonly CheckBox _blockKnownRemoteWakeCheckbox;
+    private readonly TextBox _customRemoteWakeTextBox;
     private readonly CheckBox _startMinimizedCheckbox;
     private readonly CheckBox _autostartCheckbox;
     private readonly Label _statusLabel;
@@ -25,6 +27,9 @@ public sealed class MainForm : Form
     private readonly Label _standbyConnectivityQuickStateLabel;
     private readonly Label _batteryStandbyHibernateQuickStateLabel;
     private readonly Label _remoteWakeQuickStateLabel;
+    private readonly Label _customRemoteWakeHintLabel;
+    private readonly TextBox _detailsTextBox;
+    private readonly TextBox _diagnosticsTextBox;
     private readonly TextBox _logTextBox;
     private readonly EventHandler _stateChangedHandler;
     private readonly Icon _appIcon;
@@ -39,9 +44,9 @@ public sealed class MainForm : Form
         _appIcon = (Icon)appIcon.Clone();
 
         Text = "SleepSentinel";
-        Width = 860;
-        Height = 640;
-        MinimumSize = new Size(760, 540);
+        Width = 960;
+        Height = 740;
+        MinimumSize = new Size(820, 600);
         StartPosition = FormStartPosition.CenterScreen;
         Icon = _appIcon;
 
@@ -49,9 +54,10 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
+            RowCount = 5,
             Padding = new Padding(16)
         };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -61,7 +67,7 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Top,
             AutoSize = true,
-            Text = "让电脑在“该睡就睡”时不要被其他软件长期唤醒，同时保留类似 PowerToys Awake 的无限保持唤醒模式。"
+            Text = "让电脑在“该睡就睡”时不要被其他软件长期唤醒，同时保留类似 PowerToys Awake 的无限保持唤醒模式。设置现在会自动生效。"
         };
         root.Controls.Add(intro);
 
@@ -75,31 +81,40 @@ public sealed class MainForm : Form
         settingsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
         settingsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        _policyModeComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Left, Width = 280 };
-        _policyModeComboBox.Items.AddRange(new object[]
-        {
+        _policyModeComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280 };
+        _policyModeComboBox.Items.AddRange(
+        [
             "遵循电源计划",
             "无限保持唤醒（类似 PowerToys Awake）"
-        });
+        ]);
+        _policyModeComboBox.SelectedIndexChanged += (_, _) => ApplyUiSettingsImmediately();
 
-        _resumeProtectionCheckbox = new CheckBox { AutoSize = true, Text = "恢复后自动重新进入睡眠/休眠，避免被软件唤醒后常驻亮机" };
+        _resumeProtectionCheckbox = new CheckBox
+        {
+            AutoSize = true,
+            Text = "恢复后自动重新进入睡眠/休眠，避免被软件唤醒后常驻亮机"
+        };
+        _resumeProtectionCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
-        _resumeActionComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Left, Width = 180 };
-        _resumeActionComboBox.Items.AddRange(new object[] { "睡眠", "休眠" });
+        _resumeActionComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 180 };
+        _resumeActionComboBox.Items.AddRange(["睡眠", "休眠"]);
+        _resumeActionComboBox.SelectedIndexChanged += (_, _) => ApplyUiSettingsImmediately();
 
         _resumeDelayInput = new NumericUpDown
         {
             Minimum = 3,
             Maximum = 600,
-            Value = 8,
             Width = 100
         };
+        _resumeDelayInput.ValueChanged += (_, _) => ApplyUiSettingsImmediately();
 
         _onlyUnattendedWakeCheckbox = new CheckBox
         {
             AutoSize = true,
             Text = "仅在人工行为时跳过；人工包括键盘、鼠标、开盖、解锁、控制台/远程接管、登录"
         };
+        _onlyUnattendedWakeCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
+
         _disableWakeTimersCheckbox = new CheckBox
         {
             AutoSize = true,
@@ -121,10 +136,9 @@ public sealed class MainForm : Form
                 _controller.RestoreSoftwareWake();
             }
 
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
+            SyncUiFromController();
         };
+
         _disableStandbyConnectivityCheckbox = new CheckBox
         {
             AutoSize = true,
@@ -146,14 +160,24 @@ public sealed class MainForm : Form
                 _controller.RestoreStandbyConnectivityWake();
             }
 
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
+            SyncUiFromController();
         };
+
+        _batteryStandbyHibernateTimeoutInput = new NumericUpDown
+        {
+            Minimum = 3,
+            Maximum = 240,
+            Width = 90
+        };
+        _batteryStandbyHibernateTimeoutInput.ValueChanged += (_, _) =>
+        {
+            UpdateBatteryStandbyHibernateCheckboxText();
+            ApplyUiSettingsImmediately();
+        };
+
         _enforceBatteryStandbyHibernateCheckbox = new CheckBox
         {
-            AutoSize = true,
-            Text = "电池供电下在待机 10 分钟后自动转入休眠（仅 DC，防止合盖后一夜耗尽）"
+            AutoSize = true
         };
         _enforceBatteryStandbyHibernateCheckbox.CheckedChanged += (_, _) =>
         {
@@ -171,10 +195,9 @@ public sealed class MainForm : Form
                 _controller.RestoreBatteryStandbyHibernateFallback();
             }
 
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
+            SyncUiFromController();
         };
+
         _blockKnownRemoteWakeCheckbox = new CheckBox
         {
             AutoSize = true,
@@ -196,18 +219,28 @@ public sealed class MainForm : Form
                 _controller.RestoreKnownRemoteWakeRequests();
             }
 
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
+            SyncUiFromController();
         };
 
+        _customRemoteWakeTextBox = new TextBox
+        {
+            Multiline = true,
+            Width = 460,
+            Height = 54,
+            ScrollBars = ScrollBars.Vertical,
+            AcceptsReturn = true
+        };
+        _customRemoteWakeTextBox.Leave += (_, _) => ApplyCustomRemoteEntriesFromUi();
+
         _startMinimizedCheckbox = new CheckBox { AutoSize = true, Text = "启动后仅驻留托盘" };
+        _startMinimizedCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
         _autostartCheckbox = new CheckBox { AutoSize = true, Text = "开机自启" };
+        _autostartCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
         AddSettingRow(settingsPanel, 0, "工作模式", _policyModeComboBox);
         AddSettingRow(settingsPanel, 1, "恢复保护", _resumeProtectionCheckbox);
 
-        var resumeOptionsFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
+        var resumeOptionsFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
         resumeOptionsFlow.Controls.Add(new Label { Text = "恢复后执行", AutoSize = true, Padding = new Padding(0, 7, 8, 0) });
         resumeOptionsFlow.Controls.Add(_resumeActionComboBox);
         resumeOptionsFlow.Controls.Add(new Label { Text = "延迟秒数", AutoSize = true, Padding = new Padding(16, 7, 8, 0) });
@@ -215,14 +248,12 @@ public sealed class MainForm : Form
         AddSettingRow(settingsPanel, 2, "保护细节", resumeOptionsFlow);
         AddSettingRow(settingsPanel, 3, "唤醒过滤", _onlyUnattendedWakeCheckbox);
 
-        var wakeTimerActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
+        var wakeTimerActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
         var reapplyWakeTimerButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyWakeTimerButton.Click += (_, _) =>
         {
             _controller.ReapplyWakeTimerPolicy();
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
+            SyncUiFromController();
         };
         _wakeTimerQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         wakeTimerActions.Controls.Add(_disableWakeTimersCheckbox);
@@ -230,14 +261,12 @@ public sealed class MainForm : Form
         wakeTimerActions.Controls.Add(_wakeTimerQuickStateLabel);
         AddSettingRow(settingsPanel, 4, "软件唤醒", wakeTimerActions);
 
-        var standbyConnectivityActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
+        var standbyConnectivityActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
         var reapplyStandbyConnectivityButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyStandbyConnectivityButton.Click += (_, _) =>
         {
             _controller.ReapplyStandbyConnectivityPolicy();
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
+            SyncUiFromController();
         };
         _standbyConnectivityQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         standbyConnectivityActions.Controls.Add(_disableStandbyConnectivityCheckbox);
@@ -245,40 +274,54 @@ public sealed class MainForm : Form
         standbyConnectivityActions.Controls.Add(_standbyConnectivityQuickStateLabel);
         AddSettingRow(settingsPanel, 5, "待机联网", standbyConnectivityActions);
 
-        var batteryStandbyHibernateActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
+        var batteryStandbyHibernateActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
         var reapplyBatteryStandbyHibernateButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyBatteryStandbyHibernateButton.Click += (_, _) =>
         {
+            ApplyUiSettingsImmediately();
             _controller.ReapplyBatteryStandbyHibernatePolicy();
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
+            SyncUiFromController();
         };
         _batteryStandbyHibernateQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         batteryStandbyHibernateActions.Controls.Add(_enforceBatteryStandbyHibernateCheckbox);
+        batteryStandbyHibernateActions.Controls.Add(new Label { Text = "分钟数", AutoSize = true, Padding = new Padding(16, 7, 8, 0) });
+        batteryStandbyHibernateActions.Controls.Add(_batteryStandbyHibernateTimeoutInput);
         batteryStandbyHibernateActions.Controls.Add(reapplyBatteryStandbyHibernateButton);
         batteryStandbyHibernateActions.Controls.Add(_batteryStandbyHibernateQuickStateLabel);
         AddSettingRow(settingsPanel, 6, "电池兜底", batteryStandbyHibernateActions);
 
-        var remoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
+        var remoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
         var reapplyRemoteWakeButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyRemoteWakeButton.Click += (_, _) =>
         {
+            ApplyCustomRemoteEntriesFromUi();
             _controller.ReapplyKnownRemoteWakePolicy();
-            ApplySettingsToUi(_controller.CurrentSettings);
-            UpdateStatus();
-            LoadLogs();
+            SyncUiFromController();
         };
+        var suggestRemoteWakeButton = new Button { Text = "自动建议", AutoSize = true };
+        suggestRemoteWakeButton.Click += (_, _) => SuggestCustomRemoteWakeEntries();
         _remoteWakeQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         remoteWakeActions.Controls.Add(_blockKnownRemoteWakeCheckbox);
         remoteWakeActions.Controls.Add(reapplyRemoteWakeButton);
+        remoteWakeActions.Controls.Add(suggestRemoteWakeButton);
         remoteWakeActions.Controls.Add(_remoteWakeQuickStateLabel);
         AddSettingRow(settingsPanel, 7, "远控拦截", remoteWakeActions);
 
-        var startupFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left };
+        var customRemoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, FlowDirection = FlowDirection.TopDown };
+        var customRemoteWakeToolbar = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+        var applyCustomRemoteWakeButton = new Button { Text = "应用名单", AutoSize = true };
+        applyCustomRemoteWakeButton.Click += (_, _) => ApplyCustomRemoteEntriesFromUi();
+        _customRemoteWakeHintLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
+        customRemoteWakeToolbar.Controls.Add(applyCustomRemoteWakeButton);
+        customRemoteWakeToolbar.Controls.Add(_customRemoteWakeHintLabel);
+        customRemoteWakeActions.Controls.Add(_customRemoteWakeTextBox);
+        customRemoteWakeActions.Controls.Add(customRemoteWakeToolbar);
+        AddSettingRow(settingsPanel, 8, "自定义远控", customRemoteWakeActions);
+
+        var startupFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
         startupFlow.Controls.Add(_startMinimizedCheckbox);
         startupFlow.Controls.Add(_autostartCheckbox);
-        AddSettingRow(settingsPanel, 8, "启动行为", startupFlow);
+        AddSettingRow(settingsPanel, 9, "启动行为", startupFlow);
 
         root.Controls.Add(settingsPanel);
 
@@ -289,8 +332,13 @@ public sealed class MainForm : Form
             Padding = new Padding(0, 0, 0, 12)
         };
 
-        var saveButton = new Button { Text = "保存设置", AutoSize = true };
-        saveButton.Click += (_, _) => SaveSettings();
+        var reapplyAllButton = new Button { Text = "重新应用全部设置", AutoSize = true };
+        reapplyAllButton.Click += (_, _) =>
+        {
+            ApplyUiSettingsImmediately();
+            _controller.ReapplyAllManagedSettings();
+            SyncUiFromController(includeDiagnostics: false);
+        };
         var sleepButton = new Button { Text = "立即睡眠", AutoSize = true };
         sleepButton.Click += (_, _) => _controller.SleepNow();
         var hibernateButton = new Button { Text = "立即休眠", AutoSize = true };
@@ -298,46 +346,51 @@ public sealed class MainForm : Form
         var refreshLogButton = new Button { Text = "刷新日志", AutoSize = true };
         refreshLogButton.Click += (_, _) => LoadLogs();
         var diagnosticsButton = new Button { Text = "记录唤醒诊断", AutoSize = true };
-        diagnosticsButton.Click += (_, _) =>
-        {
-            _logger.Warn("用户手动收集唤醒诊断。");
-            _logger.Warn(_controller.CollectWakeDiagnostics());
-            LoadLogs();
-        };
+        diagnosticsButton.Click += (_, _) => RefreshDiagnostics(logSnapshot: true);
         var exportReportButton = new Button { Text = "导出诊断报告", AutoSize = true };
         exportReportButton.Click += (_, _) => ExportDiagnosticReport();
 
-        actionsFlow.Controls.Add(saveButton);
+        actionsFlow.Controls.Add(reapplyAllButton);
         actionsFlow.Controls.Add(sleepButton);
         actionsFlow.Controls.Add(hibernateButton);
         actionsFlow.Controls.Add(refreshLogButton);
         actionsFlow.Controls.Add(diagnosticsButton);
         actionsFlow.Controls.Add(exportReportButton);
-
-        _statusLabel = new Label { AutoSize = true, Dock = DockStyle.Top, Padding = new Padding(0, 0, 0, 12) };
-
         root.Controls.Add(actionsFlow);
+
+        _statusLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Top,
+            Padding = new Padding(0, 0, 0, 12)
+        };
         root.Controls.Add(_statusLabel);
 
-        _logTextBox = new TextBox
+        var tabs = new TabControl
         {
-            Multiline = true,
-            ReadOnly = true,
-            ScrollBars = ScrollBars.Vertical,
-            Dock = DockStyle.Fill,
-            Font = new Font(FontFamily.GenericMonospace, 9.5f)
+            Dock = DockStyle.Fill
         };
-        root.Controls.Add(_logTextBox);
+
+        _detailsTextBox = CreateReadOnlyOutputTextBox();
+        _diagnosticsTextBox = CreateReadOnlyOutputTextBox();
+        _logTextBox = CreateReadOnlyOutputTextBox();
+        _logTextBox.Font = new Font(FontFamily.GenericMonospace, 9.5f);
+
+        tabs.TabPages.Add(CreateTabPage("状态详情", _detailsTextBox));
+        tabs.TabPages.Add(CreateTabPage("诊断摘要", _diagnosticsTextBox));
+        tabs.TabPages.Add(CreateTabPage("运行日志", _logTextBox));
+        root.Controls.Add(tabs);
 
         Controls.Add(root);
 
-        _stateChangedHandler = (_, _) => UpdateStatus();
+        _stateChangedHandler = (_, _) => RefreshStatusAndDetails();
 
         _logger.LogWritten += OnLogWritten;
         _controller.StateChanged += _stateChangedHandler;
 
         ApplySettingsToUi(_controller.CurrentSettings);
-        UpdateStatus();
+        RefreshStatusAndDetails();
+        _diagnosticsTextBox.Text = "最近诊断尚未刷新。点击“记录唤醒诊断”后，这里会显示 powercfg、事件日志和 SleepStudy 摘要。";
         LoadLogs();
     }
 
@@ -374,7 +427,50 @@ public sealed class MainForm : Form
         base.Dispose(disposing);
     }
 
-    private void SaveSettings()
+    private void ApplyUiSettingsImmediately()
+    {
+        if (_suppressInteractiveToggleEvents)
+        {
+            return;
+        }
+
+        var settings = CreateSettingsFromUi();
+        _controller.UpdateSettings(settings);
+        SyncUiFromController(includeDiagnostics: false);
+    }
+
+    private void ApplyCustomRemoteEntriesFromUi()
+    {
+        if (_suppressInteractiveToggleEvents)
+        {
+            return;
+        }
+
+        _controller.UpdateCustomRemoteWakeEntries(ParseCustomRemoteWakeEntries(_customRemoteWakeTextBox.Text));
+        SyncUiFromController(includeDiagnostics: false);
+    }
+
+    private void SuggestCustomRemoteWakeEntries()
+    {
+        var suggestions = _controller.SuggestCustomRemoteWakeEntries();
+        if (suggestions.Count == 0)
+        {
+            MessageBox.Show("当前 requests / 运行进程 / 服务里没有发现新的远控候选项。", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var mergedEntries = ParseCustomRemoteWakeEntries(_customRemoteWakeTextBox.Text)
+            .Concat(suggestions)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(static entry => entry, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        _customRemoteWakeTextBox.Text = string.Join(Environment.NewLine, mergedEntries);
+        ApplyCustomRemoteEntriesFromUi();
+        MessageBox.Show($"已追加 {suggestions.Count} 条候选项到自定义远控名单。", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private AppSettings CreateSettingsFromUi()
     {
         var settings = _settingsStore.Load();
         settings.PolicyMode = _policyModeComboBox.SelectedIndex == 1
@@ -386,44 +482,52 @@ public sealed class MainForm : Form
             : ResumeProtectionMode.Sleep;
         settings.ResumeProtectionOnlyForUnattendedWake = _onlyUnattendedWakeCheckbox.Checked;
         settings.ResumeProtectionDelaySeconds = (int)_resumeDelayInput.Value;
+        settings.DisableWakeTimers = _disableWakeTimersCheckbox.Checked;
+        settings.DisableStandbyConnectivity = _disableStandbyConnectivityCheckbox.Checked;
+        settings.EnforceBatteryStandbyHibernate = _enforceBatteryStandbyHibernateCheckbox.Checked;
+        settings.BatteryStandbyHibernateTimeoutSeconds = checked((int)_batteryStandbyHibernateTimeoutInput.Value * 60);
+        settings.BlockKnownRemoteWakeRequests = _blockKnownRemoteWakeCheckbox.Checked;
+        settings.CustomRemoteWakeEntries = ParseCustomRemoteWakeEntries(_customRemoteWakeTextBox.Text).ToList();
         settings.StartMinimized = _startMinimizedCheckbox.Checked;
         settings.StartWithWindows = _autostartCheckbox.Checked;
-
-        _controller.UpdateSettings(settings);
-        ApplySettingsToUi(settings);
-        UpdateStatus();
-        LoadLogs();
+        return settings;
     }
 
     private void ApplySettingsToUi(AppSettings settings)
     {
-        _policyModeComboBox.SelectedIndex = settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely ? 1 : 0;
         _suppressInteractiveToggleEvents = true;
         try
         {
+            _policyModeComboBox.SelectedIndex = settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely ? 1 : 0;
             _resumeProtectionCheckbox.Checked = settings.ResumeProtectionEnabled;
             _resumeActionComboBox.SelectedIndex = settings.ResumeProtectionMode == ResumeProtectionMode.Hibernate ? 1 : 0;
             _onlyUnattendedWakeCheckbox.Checked = settings.ResumeProtectionOnlyForUnattendedWake;
             _resumeDelayInput.Value = Math.Clamp(settings.ResumeProtectionDelaySeconds, 3, 600);
-            _startMinimizedCheckbox.Checked = settings.StartMinimized;
-            _autostartCheckbox.Checked = settings.StartWithWindows;
             _disableWakeTimersCheckbox.Checked = settings.DisableWakeTimers;
             _disableStandbyConnectivityCheckbox.Checked = settings.DisableStandbyConnectivity;
+            _batteryStandbyHibernateTimeoutInput.Value = Math.Clamp(settings.BatteryStandbyHibernateTimeoutSeconds / 60, 3, 240);
             _enforceBatteryStandbyHibernateCheckbox.Checked = settings.EnforceBatteryStandbyHibernate;
             _blockKnownRemoteWakeCheckbox.Checked = settings.BlockKnownRemoteWakeRequests;
+            _customRemoteWakeTextBox.Text = string.Join(Environment.NewLine, settings.CustomRemoteWakeEntries);
+            _startMinimizedCheckbox.Checked = settings.StartMinimized;
+            _autostartCheckbox.Checked = settings.StartWithWindows;
         }
         finally
         {
             _suppressInteractiveToggleEvents = false;
         }
 
+        UpdateBatteryStandbyHibernateCheckboxText();
         _wakeTimerQuickStateLabel.Text = settings.DisableWakeTimers ? "当前：已拦截" : "当前：未接管";
         _standbyConnectivityQuickStateLabel.Text = settings.DisableStandbyConnectivity ? "当前：已拦截" : "当前：未接管";
         _batteryStandbyHibernateQuickStateLabel.Text = settings.EnforceBatteryStandbyHibernate ? "当前：已兜底" : "当前：未接管";
         _remoteWakeQuickStateLabel.Text = settings.BlockKnownRemoteWakeRequests ? "当前：已拦截" : "当前：未接管";
+        _customRemoteWakeHintLabel.Text = settings.CustomRemoteWakeEntries.Count == 0
+            ? "当前：未添加自定义条目"
+            : $"当前：{settings.CustomRemoteWakeEntries.Count} 条自定义规则";
     }
 
-    private void UpdateStatus()
+    private void RefreshStatusAndDetails()
     {
         if (IsDisposed)
         {
@@ -432,15 +536,22 @@ public sealed class MainForm : Form
 
         if (InvokeRequired)
         {
-            BeginInvoke(new Action(UpdateStatus));
+            BeginInvoke(new Action(RefreshStatusAndDetails));
             return;
         }
 
         var settings = _controller.CurrentSettings;
         _statusLabel.Text =
             $"当前状态：{_controller.CurrentStatus}{Environment.NewLine}" +
+            $"风险提示：{_controller.CurrentRiskSummary}{Environment.NewLine}" +
+            $"权限状态：{_controller.CurrentCapabilitySummary}{Environment.NewLine}" +
+            $"最近一次唤醒：{settings.LastWakeSummary}{Environment.NewLine}" +
+            $"最近证据：{settings.LastWakeEvidenceSummary}";
+
+        _detailsTextBox.Text =
             $"保护规则：{_controller.CurrentProtectionRuleSummary}{Environment.NewLine}" +
-            $"最近一次唤醒判定：{settings.LastWakeSummary}{Environment.NewLine}" +
+            $"电源计划：{_controller.CurrentPowerPlanSummary}{Environment.NewLine}" +
+            $"远控名单：{_controller.CurrentManagedRemoteEntriesSummary}{Environment.NewLine}" +
             $"唤醒定时器策略：{settings.WakeTimerPolicySummary}{Environment.NewLine}" +
             $"待机联网策略：{settings.StandbyConnectivityPolicySummary}{Environment.NewLine}" +
             $"电池兜底策略：{settings.BatteryStandbyHibernatePolicySummary}{Environment.NewLine}" +
@@ -473,12 +584,36 @@ public sealed class MainForm : Form
         _logTextBox.AppendText(line + Environment.NewLine);
     }
 
+    private void RefreshDiagnostics(bool logSnapshot)
+    {
+        try
+        {
+            var snapshot = _controller.CollectWakeDiagnosticSnapshot(includePowerRequests: true, includeSleepStudy: true);
+            var text = _controller.FormatWakeDiagnosticSnapshot(snapshot, includePowerRequests: true, includeSleepStudy: true);
+            _diagnosticsTextBox.Text = text;
+
+            if (logSnapshot)
+            {
+                _logger.Warn("用户手动收集唤醒诊断。");
+                _logger.Warn(text);
+            }
+
+            RefreshStatusAndDetails();
+            LoadLogs();
+        }
+        catch (Exception ex)
+        {
+            _logger.Error($"刷新诊断失败：{ex.Message}");
+            MessageBox.Show($"刷新诊断失败：{ex.Message}", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     private void ExportDiagnosticReport()
     {
         try
         {
             var path = _diagnosticReportService.Export();
-            UpdateStatus();
+            RefreshStatusAndDetails();
             LoadLogs();
             MessageBox.Show($"诊断报告已导出：\n{path}", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
@@ -487,6 +622,51 @@ public sealed class MainForm : Form
             _logger.Error($"导出诊断报告失败：{ex.Message}");
             MessageBox.Show($"导出失败：{ex.Message}", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private void SyncUiFromController(bool includeDiagnostics = false)
+    {
+        ApplySettingsToUi(_controller.CurrentSettings);
+        RefreshStatusAndDetails();
+        LoadLogs();
+        if (includeDiagnostics)
+        {
+            RefreshDiagnostics(logSnapshot: false);
+        }
+    }
+
+    private void UpdateBatteryStandbyHibernateCheckboxText()
+    {
+        _enforceBatteryStandbyHibernateCheckbox.Text =
+            $"电池供电下在待机 {_batteryStandbyHibernateTimeoutInput.Value} 分钟后自动转入休眠（仅 DC，防止合盖后一夜耗尽）";
+    }
+
+    private static IReadOnlyList<string> ParseCustomRemoteWakeEntries(string text)
+    {
+        return text
+            .Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries)
+            .Select(static line => line.Trim())
+            .Where(static line => !string.IsNullOrWhiteSpace(line))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static TabPage CreateTabPage(string title, Control content)
+    {
+        var page = new TabPage(title);
+        page.Controls.Add(content);
+        return page;
+    }
+
+    private static TextBox CreateReadOnlyOutputTextBox()
+    {
+        return new TextBox
+        {
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical,
+            Dock = DockStyle.Fill
+        };
     }
 
     private static void AddSettingRow(TableLayoutPanel panel, int rowIndex, string labelText, Control control)

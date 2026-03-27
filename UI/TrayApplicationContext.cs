@@ -1,3 +1,4 @@
+using SleepSentinel.Models;
 using SleepSentinel.Services;
 using System.Runtime.InteropServices;
 
@@ -10,11 +11,19 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly NotifyIcon _notifyIcon;
     private readonly MainForm _mainForm;
     private readonly Icon _appIcon;
+    private readonly SettingsStore _settingsStore;
     private readonly EventWaitHandle _activationSignal;
     private readonly RegisteredWaitHandle _activationWaitHandle;
     private readonly TrayMessageWindow _trayMessageWindow;
+    private readonly DiagnosticReportService _diagnosticReportService;
     private readonly ToolStripMenuItem _followPowerPlanMenuItem;
     private readonly ToolStripMenuItem _keepAwakeMenuItem;
+    private readonly ToolStripMenuItem _wakeTimersMenuItem;
+    private readonly ToolStripMenuItem _standbyConnectivityMenuItem;
+    private readonly ToolStripMenuItem _batteryFallbackMenuItem;
+    private readonly ToolStripMenuItem _remoteWakeMenuItem;
+    private readonly ToolStripMenuItem _startMinimizedMenuItem;
+    private readonly ToolStripMenuItem _autostartMenuItem;
     private readonly EventHandler _stateChangedHandler;
     private bool _isExiting;
 
@@ -28,7 +37,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         _controller = controller;
         _logger = logger;
         _appIcon = (Icon)appIcon.Clone();
+        _settingsStore = settingsStore;
         _activationSignal = activationSignal;
+        _diagnosticReportService = new DiagnosticReportService(settingsStore, logger, controller);
 
         _mainForm = new MainForm(controller, logger, settingsStore, _appIcon);
         _mainForm.FormClosed += (_, _) =>
@@ -45,20 +56,97 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add("打开面板", null, (_, _) => ShowMainForm());
         menu.Items.Add(new ToolStripSeparator());
 
-        _followPowerPlanMenuItem = new ToolStripMenuItem("遵循电源计划")
-        {
-            CheckOnClick = false
-        };
-        _followPowerPlanMenuItem.Click += (_, _) => _controller.SetPolicyMode(Models.PowerPolicyMode.FollowPowerPlan);
+        _followPowerPlanMenuItem = new ToolStripMenuItem("遵循电源计划");
+        _followPowerPlanMenuItem.Click += (_, _) => _controller.SetPolicyMode(PowerPolicyMode.FollowPowerPlan);
         menu.Items.Add(_followPowerPlanMenuItem);
 
-        _keepAwakeMenuItem = new ToolStripMenuItem("无限保持唤醒（类似 PowerToys Awake）")
-        {
-            CheckOnClick = false
-        };
-        _keepAwakeMenuItem.Click += (_, _) => _controller.SetPolicyMode(Models.PowerPolicyMode.KeepAwakeIndefinitely);
+        _keepAwakeMenuItem = new ToolStripMenuItem("无限保持唤醒（类似 PowerToys Awake）");
+        _keepAwakeMenuItem.Click += (_, _) => _controller.SetPolicyMode(PowerPolicyMode.KeepAwakeIndefinitely);
         menu.Items.Add(_keepAwakeMenuItem);
 
+        menu.Items.Add(new ToolStripSeparator());
+
+        _wakeTimersMenuItem = new ToolStripMenuItem("接管唤醒定时器");
+        _wakeTimersMenuItem.Click += (_, _) =>
+        {
+            if (_controller.CurrentSettings.DisableWakeTimers)
+            {
+                _controller.RestoreSoftwareWake();
+            }
+            else
+            {
+                _controller.BlockSoftwareWake();
+            }
+        };
+        menu.Items.Add(_wakeTimersMenuItem);
+
+        _standbyConnectivityMenuItem = new ToolStripMenuItem("接管待机联网");
+        _standbyConnectivityMenuItem.Click += (_, _) =>
+        {
+            if (_controller.CurrentSettings.DisableStandbyConnectivity)
+            {
+                _controller.RestoreStandbyConnectivityWake();
+            }
+            else
+            {
+                _controller.BlockStandbyConnectivityWake();
+            }
+        };
+        menu.Items.Add(_standbyConnectivityMenuItem);
+
+        _batteryFallbackMenuItem = new ToolStripMenuItem("接管电池兜底休眠");
+        _batteryFallbackMenuItem.Click += (_, _) =>
+        {
+            if (_controller.CurrentSettings.EnforceBatteryStandbyHibernate)
+            {
+                _controller.RestoreBatteryStandbyHibernateFallback();
+            }
+            else
+            {
+                _controller.EnableBatteryStandbyHibernateFallback();
+            }
+        };
+        menu.Items.Add(_batteryFallbackMenuItem);
+
+        _remoteWakeMenuItem = new ToolStripMenuItem("接管远控保活拦截");
+        _remoteWakeMenuItem.Click += (_, _) =>
+        {
+            if (_controller.CurrentSettings.BlockKnownRemoteWakeRequests)
+            {
+                _controller.RestoreKnownRemoteWakeRequests();
+            }
+            else
+            {
+                _controller.BlockKnownRemoteWakeRequests();
+            }
+        };
+        menu.Items.Add(_remoteWakeMenuItem);
+
+        menu.Items.Add(new ToolStripSeparator());
+
+        _startMinimizedMenuItem = new ToolStripMenuItem("启动后仅驻留托盘");
+        _startMinimizedMenuItem.Click += (_, _) => ToggleSetting(static settings => settings.StartMinimized = !settings.StartMinimized);
+        menu.Items.Add(_startMinimizedMenuItem);
+
+        _autostartMenuItem = new ToolStripMenuItem("开机自启");
+        _autostartMenuItem.Click += (_, _) => ToggleSetting(static settings => settings.StartWithWindows = !settings.StartWithWindows);
+        menu.Items.Add(_autostartMenuItem);
+
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("记录唤醒诊断", null, (_, _) =>
+        {
+            var diagnostics = _controller.CollectFullWakeDiagnosticsText();
+            _logger.Warn("用户从托盘菜单手动收集唤醒诊断。");
+            _logger.Warn(diagnostics);
+        });
+        menu.Items.Add("导出诊断报告", null, (_, _) =>
+        {
+            var path = _diagnosticReportService.Export();
+            ShowTrayBalloon($"诊断报告已导出：{path}", ToolTipIcon.Info);
+        });
+        menu.Items.Add("重新应用全部设置", null, (_, _) => _controller.ReapplyAllManagedSettings());
+
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("立即睡眠", null, (_, _) => _controller.SleepNow());
         menu.Items.Add("立即休眠", null, (_, _) => _controller.HibernateNow());
         menu.Items.Add(new ToolStripSeparator());
@@ -116,9 +204,15 @@ public sealed class TrayApplicationContext : ApplicationContext
         var text = $"SleepSentinel - {_controller.CurrentStatus}";
         _notifyIcon.Text = text.Length > 63 ? text[..63] : text;
         _notifyIcon.BalloonTipTitle = "SleepSentinel";
-        _notifyIcon.BalloonTipText = _controller.CurrentStatus;
-        _followPowerPlanMenuItem.Checked = _controller.CurrentSettings.PolicyMode == Models.PowerPolicyMode.FollowPowerPlan;
-        _keepAwakeMenuItem.Checked = _controller.CurrentSettings.PolicyMode == Models.PowerPolicyMode.KeepAwakeIndefinitely;
+        _notifyIcon.BalloonTipText = _controller.CurrentRiskSummary;
+        _followPowerPlanMenuItem.Checked = _controller.CurrentSettings.PolicyMode == PowerPolicyMode.FollowPowerPlan;
+        _keepAwakeMenuItem.Checked = _controller.CurrentSettings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely;
+        _wakeTimersMenuItem.Checked = _controller.CurrentSettings.DisableWakeTimers;
+        _standbyConnectivityMenuItem.Checked = _controller.CurrentSettings.DisableStandbyConnectivity;
+        _batteryFallbackMenuItem.Checked = _controller.CurrentSettings.EnforceBatteryStandbyHibernate;
+        _remoteWakeMenuItem.Checked = _controller.CurrentSettings.BlockKnownRemoteWakeRequests;
+        _startMinimizedMenuItem.Checked = _controller.CurrentSettings.StartMinimized;
+        _autostartMenuItem.Checked = _controller.CurrentSettings.StartWithWindows;
     }
 
     private void RefreshTrayTextOnUiThread()
@@ -140,6 +234,13 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
 
         RefreshTrayText();
+    }
+
+    private void ToggleSetting(Action<AppSettings> mutation)
+    {
+        var updatedSettings = _settingsStore.Load();
+        mutation(updatedSettings);
+        _controller.UpdateSettings(updatedSettings);
     }
 
     private void OnExternalActivationRequested()
@@ -198,6 +299,11 @@ public sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.Icon = _appIcon;
         RefreshTrayText();
         _notifyIcon.Visible = true;
+    }
+
+    private void ShowTrayBalloon(string message, ToolTipIcon icon)
+    {
+        _notifyIcon.ShowBalloonTip(2000, "SleepSentinel", message, icon);
     }
 
     private sealed class TrayMessageWindow : NativeWindow, IDisposable

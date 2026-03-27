@@ -10,6 +10,9 @@ public sealed class AppSettings
     public bool DisableStandbyConnectivity { get; set; }
     public bool EnforceBatteryStandbyHibernate { get; set; }
     public bool BlockKnownRemoteWakeRequests { get; set; }
+    public int BatteryStandbyHibernateTimeoutSeconds { get; set; } = 600;
+    public Dictionary<string, PowerPlanRestoreSnapshot> PowerPlanRestoreSnapshots { get; set; } = [];
+    public List<string> CustomRemoteWakeEntries { get; set; } = [];
     public bool WakeTimerRestoreSnapshotCaptured { get; set; }
     public int WakeTimerRestoreAcValue { get; set; }
     public int WakeTimerRestoreDcValue { get; set; }
@@ -29,6 +32,7 @@ public sealed class AppSettings
     public DateTimeOffset? LastSuspendUtc { get; set; }
     public DateTimeOffset? LastResumeUtc { get; set; }
     public string LastWakeSummary { get; set; } = "无";
+    public string LastWakeEvidenceSummary { get; set; } = "无";
     public string WakeTimerPolicySummary { get; set; } = "未检查";
     public string StandbyConnectivityPolicySummary { get; set; } = "未检查";
     public string BatteryStandbyHibernatePolicySummary { get; set; } = "未检查";

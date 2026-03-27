@@ -1,5 +1,5 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text.RegularExpressions;
 using Microsoft.Win32;
 using SleepSentinel.Models;
@@ -9,7 +9,7 @@ namespace SleepSentinel.Services;
 public sealed class PowerController : IDisposable
 {
     private static readonly TimeSpan ManualResumeSignalWindow = TimeSpan.FromSeconds(20);
-    private const int PowerCfgTimeoutMilliseconds = 3000;
+    private const int DefaultBatteryStandbyHibernateTimeoutSeconds = 600;
     private const int WakeTimerDisabledValue = 0;
     private const int WakeTimerEnabledValue = 1;
     private const int StandbyConnectivityDisabledValue = 0;
@@ -19,7 +19,6 @@ public sealed class PowerController : IDisposable
     private const int DisconnectedStandbyModeAggressiveValue = 1;
     private const int HibernateAfterStandbyDisabledValue = 0;
     private const int HibernateAfterStandbyFallbackRestoreDcValue = int.MaxValue;
-    private const int BatteryStandbyHibernateTimeoutSeconds = 600;
     private const int RequestDisplayMask = 1;
     private const int RequestSystemMask = 2;
     private const int RequestAwayModeMask = 4;
@@ -30,6 +29,12 @@ public sealed class PowerController : IDisposable
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex CurrentDcPowerSettingRegex = new(
         @"(?:Current DC Power Setting Index|当前直流电源设置索引):\s*0x(?<value>[0-9a-fA-F]+)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex ActiveSchemeRegex = new(
+        @"(?<guid>[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex ActiveSchemeNameRegex = new(
+        @"\((?<name>[^)]+)\)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly string[] ManualWakeIndicators =
     [
@@ -106,6 +111,8 @@ public sealed class PowerController : IDisposable
     ];
     private readonly SettingsStore _settingsStore;
     private readonly FileLogger _logger;
+    private readonly PowerCfgService _powerCfg;
+    private readonly WakeDiagnosticsService _wakeDiagnostics;
     private readonly object _manualSignalSync = new();
     private readonly object _resumeProtectionSync = new();
     private readonly PowerNotificationWindow? _powerNotificationWindow;
@@ -120,6 +127,10 @@ public sealed class PowerController : IDisposable
         _settingsStore = settingsStore;
         _logger = logger;
         _settings = settings;
+        _powerCfg = new PowerCfgService(logger);
+        _wakeDiagnostics = new WakeDiagnosticsService(_powerCfg, logger);
+        EnsureSettingsDefaults();
+        MigrateLegacyRestoreSnapshotsIfNeeded();
         _resumeTimer = new System.Threading.Timer(
             static state => ((PowerController)state!).OnResumeTimerElapsed(),
             this,
@@ -157,11 +168,7 @@ public sealed class PowerController : IDisposable
         }
         if (_settings.EnforceBatteryStandbyHibernate)
         {
-            if (!_settings.BatteryStandbyHibernateRestoreSnapshotCaptured)
-            {
-                CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
-            }
-
+            CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
             ApplyBatteryStandbyHibernatePolicy();
         }
         else
@@ -177,6 +184,7 @@ public sealed class PowerController : IDisposable
             RefreshKnownRemoteWakePolicySummary();
         }
         EnsureAutostartMatchesSettings();
+        _settingsStore.Save(_settings);
         _logger.Info($"应用启动，当前模式：{DescribeMode(_settings.PolicyMode)}。");
     }
 
@@ -192,6 +200,14 @@ public sealed class PowerController : IDisposable
                 : "遵循电源计划");
 
     public string CurrentProtectionRuleSummary => BuildProtectionRuleSummary();
+
+    public string CurrentCapabilitySummary => BuildCapabilitySummary();
+
+    public string CurrentRiskSummary => BuildRiskSummary();
+
+    public string CurrentPowerPlanSummary => BuildPowerPlanSummary();
+
+    public string CurrentManagedRemoteEntriesSummary => BuildManagedRemoteEntriesSummary();
 
     public void SetPolicyMode(PowerPolicyMode mode)
     {
@@ -210,6 +226,7 @@ public sealed class PowerController : IDisposable
         CancelPendingResumeProtection();
         var previousSettings = _settings;
         _settings = updatedSettings;
+        EnsureSettingsDefaults();
         _settingsStore.Save(_settings);
         ApplyPolicy(_settings.PolicyMode);
         if (_settings.DisableWakeTimers)
@@ -281,7 +298,7 @@ public sealed class PowerController : IDisposable
             RefreshKnownRemoteWakePolicySummary();
         }
         EnsureAutostartMatchesSettings();
-        _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，电池兜底休眠={_settings.EnforceBatteryStandbyHibernate}，远控拦截={_settings.BlockKnownRemoteWakeRequests}。");
+        _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，电池兜底休眠={_settings.EnforceBatteryStandbyHibernate}（{DescribePowerSettingDuration(GetBatteryStandbyHibernateTimeoutSeconds())}），远控拦截={_settings.BlockKnownRemoteWakeRequests}，自定义远控={_settings.CustomRemoteWakeEntries.Count} 条。");
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -299,16 +316,98 @@ public sealed class PowerController : IDisposable
 
     public string CollectWakeDiagnostics()
     {
-        var lastWake = RunPowerCfg("/lastwake");
-        var wakeTimers = RunPowerCfg("/waketimers");
-        return $"lastwake:{Environment.NewLine}{lastWake}{Environment.NewLine}{Environment.NewLine}waketimers:{Environment.NewLine}{wakeTimers}";
+        var snapshot = CollectWakeDiagnosticSnapshot(includePowerRequests: false, includeSleepStudy: false);
+        return BuildWakeDiagnosticsText(snapshot, includePowerRequests: false, includeSleepStudy: false);
     }
 
     public string CollectPowerRequestDiagnostics()
     {
-        var requests = RunPowerCfg("/requests");
-        var overrides = RunPowerCfg("/requestsoverride");
-        return $"requests:{Environment.NewLine}{requests}{Environment.NewLine}{Environment.NewLine}requestsoverride:{Environment.NewLine}{overrides}";
+        var snapshot = CollectWakeDiagnosticSnapshot(includePowerRequests: true, includeSleepStudy: false);
+        return $"requests:{Environment.NewLine}{snapshot.PowerRequestsText}{Environment.NewLine}{Environment.NewLine}requestsoverride:{Environment.NewLine}{snapshot.RequestOverridesText}";
+    }
+
+    public WakeDiagnosticSnapshot CollectWakeDiagnosticSnapshot(bool includePowerRequests = true, bool includeSleepStudy = true)
+    {
+        return _wakeDiagnostics.CollectSnapshot(_settings.LastSuspendUtc?.AddMinutes(-10), includePowerRequests, includeSleepStudy);
+    }
+
+    public string FormatWakeDiagnosticSnapshot(WakeDiagnosticSnapshot snapshot, bool includePowerRequests = true, bool includeSleepStudy = true)
+    {
+        return BuildWakeDiagnosticsText(snapshot, includePowerRequests, includeSleepStudy);
+    }
+
+    public string CollectFullWakeDiagnosticsText()
+    {
+        var snapshot = CollectWakeDiagnosticSnapshot(includePowerRequests: true, includeSleepStudy: true);
+        return BuildWakeDiagnosticsText(snapshot, includePowerRequests: true, includeSleepStudy: true);
+    }
+
+    public IReadOnlyList<string> SuggestCustomRemoteWakeEntries()
+    {
+        return _wakeDiagnostics.SuggestCustomRemoteWakeEntries(_settings.CustomRemoteWakeEntries);
+    }
+
+    public void UpdateCustomRemoteWakeEntries(IEnumerable<string> rawEntries)
+    {
+        var normalized = RemoteWakeBlockCatalog.NormalizeCustomEntries(rawEntries);
+        if (_settings.CustomRemoteWakeEntries.SequenceEqual(normalized, StringComparer.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var updatedSettings = _settingsStore.Load();
+        updatedSettings.CustomRemoteWakeEntries = normalized.ToList();
+        _logger.Info(normalized.Count == 0
+            ? "已清空自定义远控拦截名单。"
+            : $"已更新自定义远控拦截名单，共 {normalized.Count} 条。");
+        UpdateSettings(updatedSettings);
+    }
+
+    public void ReapplyAllManagedSettings()
+    {
+        CancelPendingResumeProtection();
+        ApplyPolicy(_settings.PolicyMode);
+
+        if (_settings.DisableWakeTimers)
+        {
+            ApplyWakeTimerPolicy();
+        }
+        else
+        {
+            RefreshWakeTimerPolicySummary();
+        }
+
+        if (_settings.DisableStandbyConnectivity)
+        {
+            ApplyStandbyConnectivityPolicy();
+        }
+        else
+        {
+            RefreshStandbyConnectivityPolicySummary();
+        }
+
+        if (_settings.EnforceBatteryStandbyHibernate)
+        {
+            ApplyBatteryStandbyHibernatePolicy();
+        }
+        else
+        {
+            RefreshBatteryStandbyHibernatePolicySummary();
+        }
+
+        if (_settings.BlockKnownRemoteWakeRequests)
+        {
+            ApplyKnownRemoteWakePolicy();
+        }
+        else
+        {
+            RefreshKnownRemoteWakePolicySummary();
+        }
+
+        EnsureAutostartMatchesSettings();
+        _settingsStore.Save(_settings);
+        _logger.Info("已重新应用当前全部设置。");
+        StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void ReapplyWakeTimerPolicy()
@@ -541,11 +640,12 @@ public sealed class PowerController : IDisposable
 
     private void ApplyWakeTimerPolicy()
     {
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
         var failures = SetWakeTimerPolicy(WakeTimerDisabledValue, WakeTimerDisabledValue);
 
         if (failures.Length == 0)
         {
-            _settings.WakeTimerPolicySummary = _settings.WakeTimerRestoreSnapshotCaptured
+            _settings.WakeTimerPolicySummary = snapshot.WakeTimerCaptured
                 ? "当前电源计划的唤醒定时器已禁用（AC/DC，可恢复到原始设置）"
                 : "当前电源计划的唤醒定时器已禁用（AC/DC，历史基线缺失时将回退到常规启用）";
             _settingsStore.Save(_settings);
@@ -560,9 +660,10 @@ public sealed class PowerController : IDisposable
 
     private void RestoreWakeTimerPolicy()
     {
-        var hadSnapshot = _settings.WakeTimerRestoreSnapshotCaptured;
-        var acValue = hadSnapshot ? _settings.WakeTimerRestoreAcValue : WakeTimerEnabledValue;
-        var dcValue = hadSnapshot ? _settings.WakeTimerRestoreDcValue : WakeTimerEnabledValue;
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
+        var hadSnapshot = snapshot.WakeTimerCaptured;
+        var acValue = hadSnapshot ? snapshot.WakeTimerAcValue : WakeTimerEnabledValue;
+        var dcValue = hadSnapshot ? snapshot.WakeTimerDcValue : WakeTimerEnabledValue;
         var failures = SetWakeTimerPolicy(acValue, dcValue);
 
         if (failures.Length == 0)
@@ -570,7 +671,9 @@ public sealed class PowerController : IDisposable
             _settings.WakeTimerPolicySummary = hadSnapshot
                 ? "已恢复当前电源计划的唤醒定时器到拦截前的 AC/DC 设置"
                 : "已恢复当前电源计划的唤醒定时器为常规启用（缺少历史基线）";
-            ClearWakeTimerRestoreSnapshot();
+            snapshot.WakeTimerCaptured = false;
+            snapshot.WakeTimerAcValue = 0;
+            snapshot.WakeTimerDcValue = 0;
             _settingsStore.Save(_settings);
             _logger.Info(_settings.WakeTimerPolicySummary);
             return;
@@ -585,8 +688,9 @@ public sealed class PowerController : IDisposable
 
     private void RefreshWakeTimerPolicySummary()
     {
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
         _settings.WakeTimerPolicySummary = _settings.DisableWakeTimers
-            ? (_settings.WakeTimerRestoreSnapshotCaptured
+            ? (snapshot.WakeTimerCaptured
                 ? "已配置为由应用禁用当前电源计划的唤醒定时器，可恢复到原始设置"
                 : "已配置为由应用禁用当前电源计划的唤醒定时器；历史基线缺失时将回退到常规启用")
             : "未由应用接管；保留系统当前唤醒定时器策略";
@@ -595,7 +699,8 @@ public sealed class PowerController : IDisposable
 
     private void CaptureWakeTimerRestoreSnapshotIfNeeded()
     {
-        if (_settings.WakeTimerRestoreSnapshotCaptured)
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
+        if (snapshot.WakeTimerCaptured)
         {
             return;
         }
@@ -606,15 +711,16 @@ public sealed class PowerController : IDisposable
             return;
         }
 
-        _settings.WakeTimerRestoreAcValue = acValue;
-        _settings.WakeTimerRestoreDcValue = dcValue;
-        _settings.WakeTimerRestoreSnapshotCaptured = true;
+        snapshot.WakeTimerAcValue = acValue;
+        snapshot.WakeTimerDcValue = dcValue;
+        snapshot.WakeTimerCaptured = true;
         _settingsStore.Save(_settings);
         _logger.Info($"已记录唤醒定时器原始设置：AC={acValue}，DC={dcValue}。");
     }
 
     private void ApplyStandbyConnectivityPolicy()
     {
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
         var failures = SetStandbyConnectivityPolicy(
             StandbyConnectivityDisabledValue,
             StandbyConnectivityDisabledValue,
@@ -623,7 +729,7 @@ public sealed class PowerController : IDisposable
 
         if (failures.Length == 0)
         {
-            _settings.StandbyConnectivityPolicySummary = _settings.StandbyConnectivityRestoreSnapshotCaptured
+            _settings.StandbyConnectivityPolicySummary = snapshot.StandbyConnectivityCaptured
                 ? "当前电源计划已关闭待机联网（AC/DC），并启用主动断网待机模式，可恢复到原始设置"
                 : "当前电源计划已关闭待机联网（AC/DC），并启用主动断网待机模式；历史基线缺失时将回退到 Windows 管理/正常模式";
             _settingsStore.Save(_settings);
@@ -638,11 +744,12 @@ public sealed class PowerController : IDisposable
 
     private void RestoreStandbyConnectivityPolicy()
     {
-        var hadSnapshot = _settings.StandbyConnectivityRestoreSnapshotCaptured;
-        var connectivityAcValue = hadSnapshot ? _settings.StandbyConnectivityRestoreAcValue : StandbyConnectivityManagedByWindowsValue;
-        var connectivityDcValue = hadSnapshot ? _settings.StandbyConnectivityRestoreDcValue : StandbyConnectivityManagedByWindowsValue;
-        var disconnectedAcValue = hadSnapshot ? _settings.DisconnectedStandbyModeRestoreAcValue : DisconnectedStandbyModeNormalValue;
-        var disconnectedDcValue = hadSnapshot ? _settings.DisconnectedStandbyModeRestoreDcValue : DisconnectedStandbyModeNormalValue;
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
+        var hadSnapshot = snapshot.StandbyConnectivityCaptured;
+        var connectivityAcValue = hadSnapshot ? snapshot.StandbyConnectivityAcValue : StandbyConnectivityManagedByWindowsValue;
+        var connectivityDcValue = hadSnapshot ? snapshot.StandbyConnectivityDcValue : StandbyConnectivityManagedByWindowsValue;
+        var disconnectedAcValue = hadSnapshot ? snapshot.DisconnectedStandbyModeAcValue : DisconnectedStandbyModeNormalValue;
+        var disconnectedDcValue = hadSnapshot ? snapshot.DisconnectedStandbyModeDcValue : DisconnectedStandbyModeNormalValue;
         var failures = SetStandbyConnectivityPolicy(
             connectivityAcValue,
             connectivityDcValue,
@@ -654,7 +761,11 @@ public sealed class PowerController : IDisposable
             _settings.StandbyConnectivityPolicySummary = hadSnapshot
                 ? "已恢复当前电源计划的待机联网和断网待机模式到拦截前的 AC/DC 设置"
                 : "已恢复当前电源计划的待机联网为 Windows 管理，断网待机模式为正常（缺少历史基线）";
-            ClearStandbyConnectivityRestoreSnapshot();
+            snapshot.StandbyConnectivityCaptured = false;
+            snapshot.StandbyConnectivityAcValue = 0;
+            snapshot.StandbyConnectivityDcValue = 0;
+            snapshot.DisconnectedStandbyModeAcValue = 0;
+            snapshot.DisconnectedStandbyModeDcValue = 0;
             _settingsStore.Save(_settings);
             _logger.Info(_settings.StandbyConnectivityPolicySummary);
             return;
@@ -669,9 +780,10 @@ public sealed class PowerController : IDisposable
 
     private void RefreshStandbyConnectivityPolicySummary()
     {
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
         if (_settings.DisableStandbyConnectivity)
         {
-            _settings.StandbyConnectivityPolicySummary = _settings.StandbyConnectivityRestoreSnapshotCaptured
+            _settings.StandbyConnectivityPolicySummary = snapshot.StandbyConnectivityCaptured
                 ? "已配置为关闭待机联网并启用主动断网待机模式，可恢复到原始设置"
                 : "已配置为关闭待机联网并启用主动断网待机模式；历史基线缺失时将回退到 Windows 管理/正常模式";
             _settingsStore.Save(_settings);
@@ -697,7 +809,8 @@ public sealed class PowerController : IDisposable
 
     private void CaptureStandbyConnectivityRestoreSnapshotIfNeeded()
     {
-        if (_settings.StandbyConnectivityRestoreSnapshotCaptured)
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
+        if (snapshot.StandbyConnectivityCaptured)
         {
             return;
         }
@@ -712,29 +825,31 @@ public sealed class PowerController : IDisposable
             return;
         }
 
-        _settings.StandbyConnectivityRestoreAcValue = connectivityAcValue;
-        _settings.StandbyConnectivityRestoreDcValue = connectivityDcValue;
-        _settings.DisconnectedStandbyModeRestoreAcValue = disconnectedAcValue;
-        _settings.DisconnectedStandbyModeRestoreDcValue = disconnectedDcValue;
-        _settings.StandbyConnectivityRestoreSnapshotCaptured = true;
+        snapshot.StandbyConnectivityAcValue = connectivityAcValue;
+        snapshot.StandbyConnectivityDcValue = connectivityDcValue;
+        snapshot.DisconnectedStandbyModeAcValue = disconnectedAcValue;
+        snapshot.DisconnectedStandbyModeDcValue = disconnectedDcValue;
+        snapshot.StandbyConnectivityCaptured = true;
         _settingsStore.Save(_settings);
         _logger.Info($"已记录待机联网原始设置：联网 AC={connectivityAcValue}，DC={connectivityDcValue}；断网待机 AC={disconnectedAcValue}，DC={disconnectedDcValue}。");
     }
 
     private void ApplyBatteryStandbyHibernatePolicy()
     {
-        var acValue = _settings.BatteryStandbyHibernateRestoreSnapshotCaptured
-            ? _settings.BatteryStandbyHibernateRestoreAcValue
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
+        var timeoutSeconds = GetBatteryStandbyHibernateTimeoutSeconds();
+        var acValue = snapshot.BatteryStandbyHibernateCaptured
+            ? snapshot.BatteryStandbyHibernateAcValue
             : TryGetCurrentHibernateAfterStandbyIndices(out var currentAcValue, out _)
                 ? currentAcValue
                 : HibernateAfterStandbyDisabledValue;
-        var failures = SetHibernateAfterStandbyPolicy(acValue, BatteryStandbyHibernateTimeoutSeconds);
+        var failures = SetHibernateAfterStandbyPolicy(acValue, timeoutSeconds);
 
         if (failures.Length == 0)
         {
-            _settings.BatteryStandbyHibernatePolicySummary = _settings.BatteryStandbyHibernateRestoreSnapshotCaptured
-                ? $"当前电源计划已配置为电池待机 {DescribePowerSettingDuration(BatteryStandbyHibernateTimeoutSeconds)}后自动休眠（DC，可恢复到原始设置）"
-                : $"当前电源计划已配置为电池待机 {DescribePowerSettingDuration(BatteryStandbyHibernateTimeoutSeconds)}后自动休眠（DC，历史基线缺失时将回退到永不休眠）";
+            _settings.BatteryStandbyHibernatePolicySummary = snapshot.BatteryStandbyHibernateCaptured
+                ? $"当前电源计划已配置为电池待机 {DescribePowerSettingDuration(timeoutSeconds)}后自动休眠（DC，可恢复到原始设置）"
+                : $"当前电源计划已配置为电池待机 {DescribePowerSettingDuration(timeoutSeconds)}后自动休眠（DC，历史基线缺失时将回退到永不休眠）";
             _settingsStore.Save(_settings);
             _logger.Info(_settings.BatteryStandbyHibernatePolicySummary);
             return;
@@ -747,13 +862,14 @@ public sealed class PowerController : IDisposable
 
     private void RestoreBatteryStandbyHibernatePolicy()
     {
-        var hadSnapshot = _settings.BatteryStandbyHibernateRestoreSnapshotCaptured;
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
+        var hadSnapshot = snapshot.BatteryStandbyHibernateCaptured;
         var acValue = hadSnapshot
-            ? _settings.BatteryStandbyHibernateRestoreAcValue
+            ? snapshot.BatteryStandbyHibernateAcValue
             : TryGetCurrentHibernateAfterStandbyIndices(out var currentAcValue, out _)
                 ? currentAcValue
                 : HibernateAfterStandbyDisabledValue;
-        var dcValue = hadSnapshot ? _settings.BatteryStandbyHibernateRestoreDcValue : HibernateAfterStandbyFallbackRestoreDcValue;
+        var dcValue = hadSnapshot ? snapshot.BatteryStandbyHibernateDcValue : HibernateAfterStandbyFallbackRestoreDcValue;
         var failures = SetHibernateAfterStandbyPolicy(acValue, dcValue);
 
         if (failures.Length == 0)
@@ -761,7 +877,9 @@ public sealed class PowerController : IDisposable
             _settings.BatteryStandbyHibernatePolicySummary = hadSnapshot
                 ? "已恢复当前电源计划的待机后休眠时间到拦截前的 AC/DC 设置"
                 : "已恢复当前电源计划的电池待机后休眠为永不（缺少历史基线）";
-            ClearBatteryStandbyHibernateRestoreSnapshot();
+            snapshot.BatteryStandbyHibernateCaptured = false;
+            snapshot.BatteryStandbyHibernateAcValue = 0;
+            snapshot.BatteryStandbyHibernateDcValue = 0;
             _settingsStore.Save(_settings);
             _logger.Info(_settings.BatteryStandbyHibernatePolicySummary);
             return;
@@ -776,11 +894,13 @@ public sealed class PowerController : IDisposable
 
     private void RefreshBatteryStandbyHibernatePolicySummary()
     {
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
+        var timeoutSeconds = GetBatteryStandbyHibernateTimeoutSeconds();
         if (_settings.EnforceBatteryStandbyHibernate)
         {
-            _settings.BatteryStandbyHibernatePolicySummary = _settings.BatteryStandbyHibernateRestoreSnapshotCaptured
-                ? $"已配置为电池待机 {DescribePowerSettingDuration(BatteryStandbyHibernateTimeoutSeconds)}后自动休眠（DC），可恢复到原始设置"
-                : $"已配置为电池待机 {DescribePowerSettingDuration(BatteryStandbyHibernateTimeoutSeconds)}后自动休眠（DC）；历史基线缺失时将回退到永不休眠";
+            _settings.BatteryStandbyHibernatePolicySummary = snapshot.BatteryStandbyHibernateCaptured
+                ? $"已配置为电池待机 {DescribePowerSettingDuration(timeoutSeconds)}后自动休眠（DC），可恢复到原始设置"
+                : $"已配置为电池待机 {DescribePowerSettingDuration(timeoutSeconds)}后自动休眠（DC）；历史基线缺失时将回退到永不休眠";
             _settingsStore.Save(_settings);
             return;
         }
@@ -800,7 +920,8 @@ public sealed class PowerController : IDisposable
 
     private void CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded()
     {
-        if (_settings.BatteryStandbyHibernateRestoreSnapshotCaptured)
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
+        if (snapshot.BatteryStandbyHibernateCaptured)
         {
             return;
         }
@@ -811,18 +932,19 @@ public sealed class PowerController : IDisposable
             return;
         }
 
-        _settings.BatteryStandbyHibernateRestoreAcValue = acValue;
-        _settings.BatteryStandbyHibernateRestoreDcValue = dcValue;
-        _settings.BatteryStandbyHibernateRestoreSnapshotCaptured = true;
+        snapshot.BatteryStandbyHibernateAcValue = acValue;
+        snapshot.BatteryStandbyHibernateDcValue = dcValue;
+        snapshot.BatteryStandbyHibernateCaptured = true;
         _settingsStore.Save(_settings);
         _logger.Info($"已记录待机后休眠原始设置：AC={acValue}，DC={dcValue}。");
     }
 
     private void ApplyKnownRemoteWakePolicy()
     {
+        var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(_settings.CustomRemoteWakeEntries);
         var failures = new List<string>();
 
-        foreach (var entry in RemoteWakeBlockCatalog.Entries)
+        foreach (var entry in managedEntries)
         {
             var result = ApplyRequestOverride(entry, FullRequestOverrideMask);
             if (!string.IsNullOrWhiteSpace(result))
@@ -831,20 +953,20 @@ public sealed class PowerController : IDisposable
             }
         }
 
-        var appliedCount = CountKnownRemoteRequestOverrides(static value => value == FullRequestOverrideMask);
+        var appliedCount = CountKnownRemoteRequestOverrides(managedEntries, static value => value == FullRequestOverrideMask);
 
         if (failures.Count == 0)
         {
             _settings.KnownRemoteWakePolicySummary =
                 _settings.KnownRemoteWakeRequestBackupCaptured
-                    ? $"已拦截常见远程软件的 DISPLAY/SYSTEM/AWAYMODE 保持唤醒请求（命中 {appliedCount}/{RemoteWakeBlockCatalog.Entries.Count} 条规则，可恢复到拦截前状态）"
-                    : $"已拦截常见远程软件的 DISPLAY/SYSTEM/AWAYMODE 保持唤醒请求（命中 {appliedCount}/{RemoteWakeBlockCatalog.Entries.Count} 条规则，历史基线缺失时将按清除处理）";
+                    ? $"已拦截常见远程软件的 DISPLAY/SYSTEM/AWAYMODE 保持唤醒请求（命中 {appliedCount}/{managedEntries.Count} 条规则，可恢复到拦截前状态）"
+                    : $"已拦截常见远程软件的 DISPLAY/SYSTEM/AWAYMODE 保持唤醒请求（命中 {appliedCount}/{managedEntries.Count} 条规则，历史基线缺失时将按清除处理）";
             _settingsStore.Save(_settings);
-            _logger.Info($"{_settings.KnownRemoteWakePolicySummary}。覆盖：{RemoteWakeBlockCatalog.ProductSummary}。");
+            _logger.Info($"{_settings.KnownRemoteWakePolicySummary}。覆盖：{RemoteWakeBlockCatalog.ProductSummary(_settings.CustomRemoteWakeEntries)}。");
             return;
         }
 
-        _settings.KnownRemoteWakePolicySummary = $"应用远程软件拦截规则时收到输出，请检查日志（已命中 {appliedCount}/{RemoteWakeBlockCatalog.Entries.Count} 条规则）";
+        _settings.KnownRemoteWakePolicySummary = $"应用远程软件拦截规则时收到输出，请检查日志（已命中 {appliedCount}/{managedEntries.Count} 条规则）";
         _settingsStore.Save(_settings);
         _logger.Warn($"应用远程软件拦截规则时收到输出：{Environment.NewLine}{string.Join(Environment.NewLine, failures)}");
     }
@@ -853,8 +975,9 @@ public sealed class PowerController : IDisposable
     {
         var failures = new List<string>();
         var hadSnapshot = _settings.KnownRemoteWakeRequestBackupCaptured;
+        var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(_settings.CustomRemoteWakeEntries);
 
-        foreach (var entry in RemoteWakeBlockCatalog.Entries)
+        foreach (var entry in managedEntries)
         {
             var backupKey = BuildRequestOverrideBackupKey(entry);
             if (hadSnapshot
@@ -881,7 +1004,8 @@ public sealed class PowerController : IDisposable
             _settings.KnownRemoteWakePolicySummary = hadSnapshot
                 ? "已恢复常见远程软件拦截前的系统请求替代状态"
                 : "已清除应用管理的常见远程软件拦截规则（缺少历史基线时按清除处理）";
-            ClearKnownRemoteWakeRestoreSnapshot();
+            _settings.KnownRemoteWakeRequestBackupCaptured = false;
+            _settings.KnownRemoteWakeRequestOverrideBackup = [];
             _settingsStore.Save(_settings);
             _logger.Info(_settings.KnownRemoteWakePolicySummary);
             return;
@@ -896,7 +1020,8 @@ public sealed class PowerController : IDisposable
 
     private void RefreshKnownRemoteWakePolicySummary()
     {
-        var managedCount = CountKnownRemoteRequestOverrides(static value => value > 0);
+        var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(_settings.CustomRemoteWakeEntries);
+        var managedCount = CountKnownRemoteRequestOverrides(managedEntries, static value => value > 0);
 
         _settings.KnownRemoteWakePolicySummary = _settings.BlockKnownRemoteWakeRequests
             ? (_settings.KnownRemoteWakeRequestBackupCaptured
@@ -916,7 +1041,7 @@ public sealed class PowerController : IDisposable
         }
 
         var snapshot = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var entry in RemoteWakeBlockCatalog.Entries)
+        foreach (var entry in RemoteWakeBlockCatalog.GetManagedEntries(_settings.CustomRemoteWakeEntries))
         {
             if (!TryGetRequestOverrideValue(entry, out var value))
             {
@@ -956,15 +1081,16 @@ public sealed class PowerController : IDisposable
 
             case PowerModes.Resume:
                 _settings.LastResumeUtc = DateTimeOffset.UtcNow;
-                var diagnostics = CollectWakeDiagnostics();
-                var analysis = AnalyzeWake(diagnostics);
+                var snapshot = CollectWakeDiagnosticSnapshot(includePowerRequests: false, includeSleepStudy: false);
+                var analysis = AnalyzeWake(snapshot);
                 if (TryGetRecentManualResumeSignal(out var manualSignalReason) && analysis.Kind != WakeKind.Manual)
                 {
                     analysis = new WakeAnalysis(WakeKind.Manual, $"检测到人工行为（{manualSignalReason}）");
                 }
                 _settings.LastWakeSummary = analysis.Summary;
+                _settings.LastWakeEvidenceSummary = _wakeDiagnostics.SummarizeEvidence(snapshot);
                 _settingsStore.Save(_settings);
-                _logger.Warn($"系统已从挂起/休眠恢复。判定：{analysis.Summary}{Environment.NewLine}{diagnostics}");
+                _logger.Warn($"系统已从挂起/休眠恢复。判定：{analysis.Summary}{Environment.NewLine}{BuildWakeDiagnosticsText(snapshot, includePowerRequests: false, includeSleepStudy: false)}");
                 StateChanged?.Invoke(this, EventArgs.Empty);
                 ArmResumeProtectionIfNeeded(analysis);
                 break;
@@ -1114,64 +1240,40 @@ public sealed class PowerController : IDisposable
 
     private string RunPowerCfg(string arguments)
     {
-        try
-        {
-            using var process = new Process();
-            process.StartInfo.FileName = "powercfg";
-            process.StartInfo.Arguments = arguments;
-            process.StartInfo.CreateNoWindow = true;
-            process.StartInfo.UseShellExecute = false;
-            process.StartInfo.RedirectStandardOutput = true;
-            process.StartInfo.RedirectStandardError = true;
-            process.Start();
-
-            var outputTask = process.StandardOutput.ReadToEndAsync();
-            var errorTask = process.StandardError.ReadToEndAsync();
-
-            if (!process.WaitForExit(PowerCfgTimeoutMilliseconds))
-            {
-                TryKillProcess(process);
-                process.WaitForExit();
-                var timeoutMessage = $"powercfg {arguments} 超时（超过 {PowerCfgTimeoutMilliseconds / 1000} 秒）";
-                _logger.Warn(timeoutMessage);
-                return timeoutMessage;
-            }
-
-            Task.WaitAll(new Task[] { outputTask, errorTask }, 1000);
-            var output = outputTask.IsCompletedSuccessfully ? outputTask.Result : string.Empty;
-            var error = errorTask.IsCompletedSuccessfully ? errorTask.Result : string.Empty;
-            if (process.ExitCode == 0)
-            {
-                return string.IsNullOrWhiteSpace(output) ? string.Empty : output.Trim();
-            }
-
-            var message = string.IsNullOrWhiteSpace(error) ? output.Trim() : error.Trim();
-            return string.IsNullOrWhiteSpace(message) ? $"powercfg {arguments} 失败，退出码 {process.ExitCode}" : message;
-        }
-        catch (Exception ex)
-        {
-            _logger.Error($"执行 powercfg {arguments} 失败：{ex.Message}");
-            return $"powercfg {arguments} 调用失败：{ex.Message}";
-        }
+        return _powerCfg.Run(arguments);
     }
 
-    private static WakeAnalysis AnalyzeWake(string diagnostics)
+    private static WakeAnalysis AnalyzeWake(WakeDiagnosticSnapshot snapshot)
     {
-        var (lastWakeText, wakeTimersText) = SplitDiagnostics(diagnostics);
-        var lastWake = lastWakeText.ToLowerInvariant();
-        var wakeTimers = wakeTimersText.ToLowerInvariant();
+        var lastWake = snapshot.LastWakeText.ToLowerInvariant();
+        var wakeTimers = snapshot.WakeTimersText.ToLowerInvariant();
+        var eventSummary = snapshot.EventSummary.ToLowerInvariant();
+        var combined = string.Join(
+            Environment.NewLine,
+            snapshot.LastWakeText,
+            snapshot.WakeTimersText,
+            snapshot.EventSummary,
+            snapshot.SleepStudySummary).ToLowerInvariant();
 
-        if (ContainsAny(lastWake, ManualWakeIndicators))
+        if (ContainsAny(combined, ManualWakeIndicators)
+            || eventSummary.Contains("input keyboard")
+            || eventSummary.Contains("input mouse")
+            || eventSummary.Contains("power button")
+            || eventSummary.Contains("lid"))
         {
             return new WakeAnalysis(WakeKind.Manual, "疑似人工唤醒（按键/开盖/鼠标键盘）");
         }
 
-        if (ContainsAny(lastWake, DeviceWakeIndicators))
+        if (ContainsAny(combined, DeviceWakeIndicators))
         {
             return new WakeAnalysis(WakeKind.Unattended, "疑似设备或网络唤醒");
         }
 
-        if (ContainsAny(lastWake, TimerWakeIndicators)
+        if (ContainsAny(combined, TimerWakeIndicators)
+            || eventSummary.Contains("windowsupdateclient")
+            || eventSummary.Contains("maintenance scheduler")
+            || eventSummary.Contains("update orchestrator")
+            || eventSummary.Contains("pdc task client")
             || (ContainsAny(wakeTimers, TimerWakeIndicators)
                 && !ContainsAny(wakeTimers, NoActiveWakeTimerIndicators)))
         {
@@ -1187,26 +1289,6 @@ public sealed class PowerController : IDisposable
         }
 
         return new WakeAnalysis(WakeKind.Unknown, "唤醒来源未知");
-    }
-
-    private static (string LastWake, string WakeTimers) SplitDiagnostics(string diagnostics)
-    {
-        const string lastWakeLabel = "lastwake:";
-        const string wakeTimersLabel = "waketimers:";
-
-        var wakeTimersIndex = diagnostics.IndexOf(wakeTimersLabel, StringComparison.OrdinalIgnoreCase);
-        var lastWake = diagnostics;
-        var wakeTimers = string.Empty;
-
-        if (wakeTimersIndex >= 0)
-        {
-            lastWake = diagnostics[..wakeTimersIndex];
-            wakeTimers = diagnostics[(wakeTimersIndex + wakeTimersLabel.Length)..];
-        }
-
-        lastWake = lastWake.Replace(lastWakeLabel, string.Empty, StringComparison.OrdinalIgnoreCase).Trim();
-        wakeTimers = wakeTimers.Trim();
-        return (lastWake, wakeTimers);
     }
 
     private static bool ContainsAny(string source, params string[] values)
@@ -1313,10 +1395,10 @@ public sealed class PowerController : IDisposable
         return false;
     }
 
-    private int CountKnownRemoteRequestOverrides(Predicate<int> predicate)
+    private int CountKnownRemoteRequestOverrides(IEnumerable<PowerRequestOverrideEntry> entries, Predicate<int> predicate)
     {
         var count = 0;
-        foreach (var entry in RemoteWakeBlockCatalog.Entries)
+        foreach (var entry in entries)
         {
             if (!TryGetRequestOverrideValue(entry, out var value))
             {
@@ -1368,33 +1450,249 @@ public sealed class PowerController : IDisposable
         return $"{entry.CallerTypeArgument}:{entry.Name}";
     }
 
-    private void ClearWakeTimerRestoreSnapshot()
+    private void EnsureSettingsDefaults()
     {
-        _settings.WakeTimerRestoreSnapshotCaptured = false;
-        _settings.WakeTimerRestoreAcValue = 0;
-        _settings.WakeTimerRestoreDcValue = 0;
+        _settings.PowerPlanRestoreSnapshots ??= new Dictionary<string, PowerPlanRestoreSnapshot>(StringComparer.OrdinalIgnoreCase);
+        _settings.CustomRemoteWakeEntries = RemoteWakeBlockCatalog.NormalizeCustomEntries(_settings.CustomRemoteWakeEntries).ToList();
+        _settings.BatteryStandbyHibernateTimeoutSeconds = Math.Clamp(
+            _settings.BatteryStandbyHibernateTimeoutSeconds <= 0
+                ? DefaultBatteryStandbyHibernateTimeoutSeconds
+                : _settings.BatteryStandbyHibernateTimeoutSeconds,
+            180,
+            14400);
+        _settings.LastWakeSummary ??= "无";
+        _settings.LastWakeEvidenceSummary ??= "无";
     }
 
-    private void ClearStandbyConnectivityRestoreSnapshot()
+    private void MigrateLegacyRestoreSnapshotsIfNeeded()
     {
-        _settings.StandbyConnectivityRestoreSnapshotCaptured = false;
-        _settings.StandbyConnectivityRestoreAcValue = 0;
-        _settings.StandbyConnectivityRestoreDcValue = 0;
-        _settings.DisconnectedStandbyModeRestoreAcValue = 0;
-        _settings.DisconnectedStandbyModeRestoreDcValue = 0;
+        var migrated = false;
+        var snapshot = GetOrCreateActivePowerPlanSnapshot();
+
+        if (_settings.WakeTimerRestoreSnapshotCaptured && !snapshot.WakeTimerCaptured)
+        {
+            snapshot.WakeTimerCaptured = true;
+            snapshot.WakeTimerAcValue = _settings.WakeTimerRestoreAcValue;
+            snapshot.WakeTimerDcValue = _settings.WakeTimerRestoreDcValue;
+            migrated = true;
+        }
+
+        if (_settings.StandbyConnectivityRestoreSnapshotCaptured && !snapshot.StandbyConnectivityCaptured)
+        {
+            snapshot.StandbyConnectivityCaptured = true;
+            snapshot.StandbyConnectivityAcValue = _settings.StandbyConnectivityRestoreAcValue;
+            snapshot.StandbyConnectivityDcValue = _settings.StandbyConnectivityRestoreDcValue;
+            snapshot.DisconnectedStandbyModeAcValue = _settings.DisconnectedStandbyModeRestoreAcValue;
+            snapshot.DisconnectedStandbyModeDcValue = _settings.DisconnectedStandbyModeRestoreDcValue;
+            migrated = true;
+        }
+
+        if (_settings.BatteryStandbyHibernateRestoreSnapshotCaptured && !snapshot.BatteryStandbyHibernateCaptured)
+        {
+            snapshot.BatteryStandbyHibernateCaptured = true;
+            snapshot.BatteryStandbyHibernateAcValue = _settings.BatteryStandbyHibernateRestoreAcValue;
+            snapshot.BatteryStandbyHibernateDcValue = _settings.BatteryStandbyHibernateRestoreDcValue;
+            migrated = true;
+        }
+
+        if (migrated)
+        {
+            _settings.WakeTimerRestoreSnapshotCaptured = false;
+            _settings.WakeTimerRestoreAcValue = 0;
+            _settings.WakeTimerRestoreDcValue = 0;
+            _settings.StandbyConnectivityRestoreSnapshotCaptured = false;
+            _settings.StandbyConnectivityRestoreAcValue = 0;
+            _settings.StandbyConnectivityRestoreDcValue = 0;
+            _settings.DisconnectedStandbyModeRestoreAcValue = 0;
+            _settings.DisconnectedStandbyModeRestoreDcValue = 0;
+            _settings.BatteryStandbyHibernateRestoreSnapshotCaptured = false;
+            _settings.BatteryStandbyHibernateRestoreAcValue = 0;
+            _settings.BatteryStandbyHibernateRestoreDcValue = 0;
+            _logger.Info($"已将旧版全局电源恢复快照迁移到当前电源计划：{snapshot.PlanName}。");
+        }
     }
 
-    private void ClearBatteryStandbyHibernateRestoreSnapshot()
+    private PowerPlanRestoreSnapshot GetOrCreateActivePowerPlanSnapshot()
     {
-        _settings.BatteryStandbyHibernateRestoreSnapshotCaptured = false;
-        _settings.BatteryStandbyHibernateRestoreAcValue = 0;
-        _settings.BatteryStandbyHibernateRestoreDcValue = 0;
+        var planId = GetActivePowerPlanKey(out var planName);
+        if (!_settings.PowerPlanRestoreSnapshots.TryGetValue(planId, out var snapshot))
+        {
+            snapshot = new PowerPlanRestoreSnapshot
+            {
+                PlanName = planName
+            };
+            _settings.PowerPlanRestoreSnapshots[planId] = snapshot;
+        }
+        else if (string.IsNullOrWhiteSpace(snapshot.PlanName) && !string.IsNullOrWhiteSpace(planName))
+        {
+            snapshot.PlanName = planName;
+        }
+
+        return snapshot;
     }
 
-    private void ClearKnownRemoteWakeRestoreSnapshot()
+    private string GetActivePowerPlanKey(out string planName)
     {
-        _settings.KnownRemoteWakeRequestBackupCaptured = false;
-        _settings.KnownRemoteWakeRequestOverrideBackup = [];
+        if (TryGetActivePowerPlanInfo(out var planId, out planName))
+        {
+            return planId;
+        }
+
+        planName = "当前电源计划";
+        return "scheme_current";
+    }
+
+    private bool TryGetActivePowerPlanInfo(out string planId, out string planName)
+    {
+        planId = string.Empty;
+        planName = string.Empty;
+
+        var output = RunPowerCfg("/getactivescheme");
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            return false;
+        }
+
+        var guidMatch = ActiveSchemeRegex.Match(output);
+        if (!guidMatch.Success)
+        {
+            return false;
+        }
+
+        planId = guidMatch.Groups["guid"].Value;
+        var nameMatch = ActiveSchemeNameRegex.Match(output);
+        if (nameMatch.Success)
+        {
+            planName = nameMatch.Groups["name"].Value.Trim();
+        }
+
+        return true;
+    }
+
+    private int GetBatteryStandbyHibernateTimeoutSeconds()
+    {
+        _settings.BatteryStandbyHibernateTimeoutSeconds = Math.Clamp(
+            _settings.BatteryStandbyHibernateTimeoutSeconds <= 0
+                ? DefaultBatteryStandbyHibernateTimeoutSeconds
+                : _settings.BatteryStandbyHibernateTimeoutSeconds,
+            180,
+            14400);
+        return _settings.BatteryStandbyHibernateTimeoutSeconds;
+    }
+
+    private string BuildWakeDiagnosticsText(WakeDiagnosticSnapshot snapshot, bool includePowerRequests, bool includeSleepStudy)
+    {
+        var builder = new System.Text.StringBuilder();
+        builder.AppendLine($"lastwake:{Environment.NewLine}{snapshot.LastWakeText}");
+        builder.AppendLine();
+        builder.AppendLine($"waketimers:{Environment.NewLine}{snapshot.WakeTimersText}");
+        builder.AppendLine();
+        builder.AppendLine($"events:{Environment.NewLine}{snapshot.EventSummary}");
+
+        if (includePowerRequests)
+        {
+            builder.AppendLine();
+            builder.AppendLine($"requests:{Environment.NewLine}{snapshot.PowerRequestsText}");
+            builder.AppendLine();
+            builder.AppendLine($"requestsoverride:{Environment.NewLine}{snapshot.RequestOverridesText}");
+        }
+
+        if (includeSleepStudy)
+        {
+            builder.AppendLine();
+            builder.AppendLine($"sleepstudy:{Environment.NewLine}{snapshot.SleepStudySummary}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(snapshot.SuggestedRemoteWakeEntriesSummary))
+        {
+            builder.AppendLine();
+            builder.AppendLine($"remote-suggestions:{Environment.NewLine}{snapshot.SuggestedRemoteWakeEntriesSummary}");
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
+    private string BuildCapabilitySummary()
+    {
+        var elevated = IsRunningElevated();
+        var parts = new List<string>
+        {
+            elevated
+                ? "当前以管理员权限运行"
+                : "当前未以管理员权限运行"
+        };
+
+        if (!elevated)
+        {
+            parts.Add("远控拦截、请求替代和部分 powercfg 写入可能受限");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_settings.KnownRemoteWakePolicySummary)
+            && _settings.BlockKnownRemoteWakeRequests
+            && _settings.KnownRemoteWakePolicySummary.Contains("请检查日志", StringComparison.OrdinalIgnoreCase))
+        {
+            parts.Add("远控拦截最近一次应用未完全成功");
+        }
+
+        return string.Join("；", parts) + "。";
+    }
+
+    private string BuildRiskSummary()
+    {
+        var risks = new List<string>();
+
+        if (_settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely)
+        {
+            risks.Add("当前处于无限保持唤醒模式");
+        }
+        else
+        {
+            if (!_settings.ResumeProtectionEnabled)
+            {
+                risks.Add("恢复保护已关闭");
+            }
+
+            if (!_settings.DisableWakeTimers)
+            {
+                risks.Add("唤醒定时器未接管");
+            }
+
+            if (!_settings.DisableStandbyConnectivity)
+            {
+                risks.Add("待机联网未接管");
+            }
+
+            if (!_settings.EnforceBatteryStandbyHibernate)
+            {
+                risks.Add("电池兜底休眠未接管");
+            }
+        }
+
+        if (!_settings.BlockKnownRemoteWakeRequests)
+        {
+            risks.Add("远控保活拦截未启用");
+        }
+
+        return risks.Count == 0
+            ? "当前保护层完整，没有明显高风险缺口。"
+            : $"当前最主要风险：{string.Join("；", risks.Take(3))}。";
+    }
+
+    private string BuildPowerPlanSummary()
+    {
+        return TryGetActivePowerPlanInfo(out var planId, out var planName)
+            ? $"当前电源计划：{planName} ({planId})"
+            : "当前电源计划：未能识别 GUID";
+    }
+
+    private string BuildManagedRemoteEntriesSummary()
+    {
+        var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(_settings.CustomRemoteWakeEntries);
+        var customCount = managedEntries.Count(static entry => entry.Product == "自定义");
+        var builtInCount = managedEntries.Count - customCount;
+        return customCount == 0
+            ? $"内置远控拦截名单 {builtInCount} 条"
+            : $"内置 {builtInCount} 条，自定义 {customCount} 条，共 {managedEntries.Count} 条";
     }
 
     private static string DescribeStandbyConnectivityValue(int value)
@@ -1607,15 +1905,11 @@ public sealed class PowerController : IDisposable
         };
     }
 
-    private static void TryKillProcess(Process process)
+    private static bool IsRunningElevated()
     {
-        try
-        {
-            process.Kill(true);
-        }
-        catch (InvalidOperationException)
-        {
-        }
+        using var identity = WindowsIdentity.GetCurrent();
+        var principal = new WindowsPrincipal(identity);
+        return principal.IsInRole(WindowsBuiltInRole.Administrator);
     }
 
     private enum WakeKind
