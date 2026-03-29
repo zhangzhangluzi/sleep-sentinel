@@ -5,6 +5,10 @@ namespace SleepSentinel.UI;
 
 public sealed class MainForm : Form
 {
+    private const int MinimumWindowWidth = 1100;
+    private const int MinimumWindowHeight = 760;
+    private const int PreferredWindowWidth = 1800;
+    private const int PreferredWindowHeight = 1180;
     private readonly PowerController _controller;
     private readonly FileLogger _logger;
     private readonly SettingsStore _settingsStore;
@@ -44,11 +48,10 @@ public sealed class MainForm : Form
         _appIcon = (Icon)appIcon.Clone();
 
         Text = "SleepSentinel";
-        Width = 960;
-        Height = 740;
-        MinimumSize = new Size(820, 600);
-        StartPosition = FormStartPosition.CenterScreen;
+        MinimumSize = new Size(MinimumWindowWidth, MinimumWindowHeight);
+        StartPosition = FormStartPosition.Manual;
         Icon = _appIcon;
+        ApplyInitialWindowBounds(_settingsStore.Load());
 
         var root = new TableLayoutPanel
         {
@@ -396,6 +399,8 @@ public sealed class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        SaveWindowBounds();
+
         if (e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
@@ -409,10 +414,17 @@ public sealed class MainForm : Form
     {
         if (WindowState == FormWindowState.Minimized && Visible)
         {
+            SaveWindowBounds();
             Hide();
         }
 
         base.OnResize(e);
+    }
+
+    protected override void OnResizeEnd(EventArgs e)
+    {
+        SaveWindowBounds();
+        base.OnResizeEnd(e);
     }
 
     protected override void Dispose(bool disposing)
@@ -641,6 +653,49 @@ public sealed class MainForm : Form
             $"电池供电下在待机 {_batteryStandbyHibernateTimeoutInput.Value} 分钟后自动转入休眠（仅 DC，防止合盖后一夜耗尽）";
     }
 
+    private void ApplyInitialWindowBounds(AppSettings settings)
+    {
+        var workingArea = Screen.FromPoint(Cursor.Position).WorkingArea;
+        var defaultWidth = Math.Min(Math.Max(MinimumWindowWidth, (int)(workingArea.Width * 0.86)), Math.Min(PreferredWindowWidth, workingArea.Width));
+        var defaultHeight = Math.Min(Math.Max(MinimumWindowHeight, (int)(workingArea.Height * 0.88)), Math.Min(PreferredWindowHeight, workingArea.Height));
+
+        if (settings.WindowBoundsCaptured
+            && settings.WindowWidth >= MinimumWindowWidth
+            && settings.WindowHeight >= MinimumWindowHeight)
+        {
+            var storedBounds = new Rectangle(settings.WindowX, settings.WindowY, settings.WindowWidth, settings.WindowHeight);
+            Bounds = FitBoundsToWorkingArea(storedBounds, workingArea);
+            return;
+        }
+
+        Size = new Size(defaultWidth, defaultHeight);
+        Location = new Point(
+            workingArea.Left + Math.Max(0, (workingArea.Width - defaultWidth) / 2),
+            workingArea.Top + Math.Max(0, (workingArea.Height - defaultHeight) / 2));
+    }
+
+    private void SaveWindowBounds()
+    {
+        if (WindowState == FormWindowState.Minimized)
+        {
+            return;
+        }
+
+        var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+        if (bounds.Width < MinimumWindowWidth || bounds.Height < MinimumWindowHeight)
+        {
+            return;
+        }
+
+        var settings = _settingsStore.Load();
+        settings.WindowBoundsCaptured = true;
+        settings.WindowWidth = bounds.Width;
+        settings.WindowHeight = bounds.Height;
+        settings.WindowX = bounds.X;
+        settings.WindowY = bounds.Y;
+        _settingsStore.Save(settings);
+    }
+
     private static IReadOnlyList<string> ParseCustomRemoteWakeEntries(string text)
     {
         return text
@@ -667,6 +722,15 @@ public sealed class MainForm : Form
             ScrollBars = ScrollBars.Vertical,
             Dock = DockStyle.Fill
         };
+    }
+
+    private static Rectangle FitBoundsToWorkingArea(Rectangle bounds, Rectangle workingArea)
+    {
+        var width = Math.Min(Math.Max(bounds.Width, MinimumWindowWidth), workingArea.Width);
+        var height = Math.Min(Math.Max(bounds.Height, MinimumWindowHeight), workingArea.Height);
+        var x = Math.Min(Math.Max(bounds.X, workingArea.Left), workingArea.Right - width);
+        var y = Math.Min(Math.Max(bounds.Y, workingArea.Top), workingArea.Bottom - height);
+        return new Rectangle(x, y, width, height);
     }
 
     private static void AddSettingRow(TableLayoutPanel panel, int rowIndex, string labelText, Control control)

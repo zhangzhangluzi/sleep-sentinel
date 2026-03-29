@@ -29,6 +29,11 @@ public sealed class AppSettings
     public int ResumeProtectionDelaySeconds { get; set; } = 8;
     public bool StartMinimized { get; set; } = true;
     public bool StartWithWindows { get; set; }
+    public bool WindowBoundsCaptured { get; set; }
+    public int WindowWidth { get; set; }
+    public int WindowHeight { get; set; }
+    public int WindowX { get; set; }
+    public int WindowY { get; set; }
     public DateTimeOffset? LastSuspendUtc { get; set; }
     public DateTimeOffset? LastResumeUtc { get; set; }
     public string LastWakeSummary { get; set; } = "无";
