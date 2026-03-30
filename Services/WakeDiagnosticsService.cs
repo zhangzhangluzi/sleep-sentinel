@@ -3,6 +3,7 @@ using System.Diagnostics.Eventing.Reader;
 using System.Globalization;
 using System.ServiceProcess;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using SleepSentinel.Models;
 
@@ -10,6 +11,10 @@ namespace SleepSentinel.Services;
 
 public sealed class WakeDiagnosticsService
 {
+    private static readonly Regex TimestampRegex = new(
+        @"(?<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     private static readonly string[] ManualIndicators =
     [
         "power button",
@@ -77,6 +82,11 @@ public sealed class WakeDiagnosticsService
 
     public string SummarizeEvidence(WakeDiagnosticSnapshot snapshot)
     {
+        if (TrySummarizeSleepToHibernatePowerButtonResume(snapshot, out var deepHibernateSummary))
+        {
+            return deepHibernateSummary;
+        }
+
         if (!string.IsNullOrWhiteSpace(snapshot.EventSummary))
         {
             var firstLine = snapshot.EventSummary
@@ -219,7 +229,7 @@ public sealed class WakeDiagnosticsService
                 return "SleepStudy XML 结构不完整。";
             }
 
-            var latestSleepState = document
+            var sleepStates = document
                 .Descendants(ns + "OsStateInstance")
                 .Select(element => new
                 {
@@ -230,17 +240,33 @@ public sealed class WakeDiagnosticsService
                     StartLocal = ParseLocalTimestamp((string?)element.Attribute("LocalTimestamp")),
                     EndLocal = ParseLocalTimestamp((string?)element.Attribute("ExitLocalTimestamp"))
                 })
-                .Where(static item => item.Type.Equals("Sleep", StringComparison.OrdinalIgnoreCase))
                 .OrderByDescending(static item => item.StartLocal)
-                .FirstOrDefault();
+                .ToList();
+
+            var latestSleepState = sleepStates
+                .FirstOrDefault(static item =>
+                    item.Type.Equals("Hibernate", StringComparison.OrdinalIgnoreCase)
+                    && item.EntryReason.Contains("Hibernate from Sleep", StringComparison.OrdinalIgnoreCase))
+                ?? sleepStates.FirstOrDefault(static item => item.Type.Equals("Sleep", StringComparison.OrdinalIgnoreCase))
+                ?? sleepStates.FirstOrDefault(static item =>
+                    item.Type.Equals("Screen Off", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(item.ExitReason)
+                    && !item.ExitReason.Equals("Unknown", StringComparison.OrdinalIgnoreCase));
 
             if (latestSleepState is null)
             {
-                return "SleepStudy 中未找到最近的 Sleep 会话。";
+                return "SleepStudy 中未找到最近的低功耗会话。";
             }
 
             var builder = new StringBuilder();
-            builder.Append($"最近 SleepStudy 会话：{latestSleepState.StartLocal:yyyy-MM-dd HH:mm:ss} -> {latestSleepState.EndLocal:yyyy-MM-dd HH:mm:ss}，进入={latestSleepState.EntryReason}，退出={latestSleepState.ExitReason}");
+            builder.Append($"最近 SleepStudy 会话（{latestSleepState.Type}）：{latestSleepState.StartLocal:yyyy-MM-dd HH:mm:ss} -> {latestSleepState.EndLocal:yyyy-MM-dd HH:mm:ss}，进入={latestSleepState.EntryReason}，退出={latestSleepState.ExitReason}");
+
+            if (latestSleepState.Type.Equals("Hibernate", StringComparison.OrdinalIgnoreCase)
+                && latestSleepState.EntryReason.Contains("Hibernate from Sleep", StringComparison.OrdinalIgnoreCase)
+                && latestSleepState.ExitReason.Contains("Power Button", StringComparison.OrdinalIgnoreCase))
+            {
+                builder.Append($"{Environment.NewLine}判定：系统先从待机自动转入更深休眠，最终由电源键成功唤醒；若中间有过第一次唤醒动作，它大概率未形成有效恢复。");
+            }
 
             var scenarioInstanceId = latestSleepState.Element
                 .Descendants(ns + "OSStateRecord")
@@ -348,5 +374,55 @@ public sealed class WakeDiagnosticsService
     private static bool ContainsAny(string value, IEnumerable<string> indicators)
     {
         return indicators.Any(indicator => value.Contains(indicator, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool TrySummarizeSleepToHibernatePowerButtonResume(WakeDiagnosticSnapshot snapshot, out string summary)
+    {
+        var hibernateEvidence = FindEvidenceLine(snapshot.EventSummary, "hibernate from sleep - fixed timeout")
+            ?? FindEvidenceLine(snapshot.SleepStudySummary, "hibernate from sleep - fixed timeout");
+        var powerButtonEvidence = FindEvidenceLine(snapshot.EventSummary, "power button")
+            ?? FindEvidenceLine(snapshot.SleepStudySummary, "power button");
+
+        if (hibernateEvidence is null || powerButtonEvidence is null)
+        {
+            summary = string.Empty;
+            return false;
+        }
+
+        var hibernateTimestamp = ExtractEvidenceTimestamp(hibernateEvidence);
+        var powerButtonTimestamp = ExtractEvidenceTimestamp(powerButtonEvidence);
+
+        summary = hibernateTimestamp is not null && powerButtonTimestamp is not null
+            ? $"检测到系统先在 {hibernateTimestamp} 从待机自动转入更深休眠，直到 {powerButtonTimestamp} 才由电源键成功唤醒；第一次唤醒大概率未形成有效恢复。"
+            : "检测到系统先从待机自动转入更深休眠，最终由电源键成功唤醒；第一次唤醒大概率未形成有效恢复。";
+        return true;
+    }
+
+    private static string? FindEvidenceLine(string text, string keyword)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        return text
+            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault(line => line.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string? ExtractEvidenceTimestamp(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return null;
+        }
+
+        var match = TimestampRegex.Match(line);
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        return match.Groups["timestamp"].Value;
     }
 }

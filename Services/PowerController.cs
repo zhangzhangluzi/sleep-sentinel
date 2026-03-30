@@ -1583,6 +1583,8 @@ public sealed class PowerController : IDisposable
     private string BuildWakeDiagnosticsText(WakeDiagnosticSnapshot snapshot, bool includePowerRequests, bool includeSleepStudy)
     {
         var builder = new System.Text.StringBuilder();
+        builder.AppendLine($"conclusion:{Environment.NewLine}{_wakeDiagnostics.SummarizeEvidence(snapshot)}");
+        builder.AppendLine();
         builder.AppendLine($"lastwake:{Environment.NewLine}{snapshot.LastWakeText}");
         builder.AppendLine();
         builder.AppendLine($"waketimers:{Environment.NewLine}{snapshot.WakeTimersText}");
