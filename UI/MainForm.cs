@@ -42,6 +42,8 @@ public sealed class MainForm : Form
     private readonly EventHandler _stateChangedHandler;
     private readonly Icon _appIcon;
     private bool _suppressInteractiveToggleEvents;
+    private bool _refreshPendingWhileHidden;
+    private bool _logsDirtyWhileHidden;
 
     public MainForm(PowerController controller, FileLogger logger, SettingsStore settingsStore, Icon appIcon)
     {
@@ -466,6 +468,16 @@ public sealed class MainForm : Form
         base.OnResize(e);
     }
 
+    public void RefreshFromController(bool includeDiagnostics = false)
+    {
+        if (_refreshPendingWhileHidden || _logsDirtyWhileHidden)
+        {
+            _refreshPendingWhileHidden = false;
+        }
+
+        SyncUiFromController(includeDiagnostics);
+    }
+
     protected override void OnResizeEnd(EventArgs e)
     {
         SaveWindowBounds();
@@ -678,6 +690,7 @@ public sealed class MainForm : Form
         _logTextBox.Lines = _logger.ReadRecent().ToArray();
         _logTextBox.SelectionStart = _logTextBox.TextLength;
         _logTextBox.ScrollToCaret();
+        _logsDirtyWhileHidden = false;
     }
 
     private void OnLogWritten(object? sender, string line)
@@ -705,6 +718,12 @@ public sealed class MainForm : Form
             return;
         }
 
+        if (!Visible)
+        {
+            _logsDirtyWhileHidden = true;
+            return;
+        }
+
         _logTextBox.AppendText(line + Environment.NewLine);
     }
 
@@ -723,7 +742,6 @@ public sealed class MainForm : Form
             }
 
             RefreshStatusAndDetails();
-            LoadLogs();
         }
         catch (Exception ex)
         {
@@ -738,7 +756,6 @@ public sealed class MainForm : Form
         {
             var path = _diagnosticReportService.Export();
             RefreshStatusAndDetails();
-            LoadLogs();
             MessageBox.Show($"诊断报告已导出：\n{path}", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
@@ -773,9 +790,21 @@ public sealed class MainForm : Form
             return;
         }
 
+        if (!Visible)
+        {
+            _refreshPendingWhileHidden = true;
+            return;
+        }
+
+        var reloadLogs = _logsDirtyWhileHidden;
+        _refreshPendingWhileHidden = false;
         ApplySettingsToUi(_controller.CurrentSettings);
         RefreshStatusAndDetails();
-        LoadLogs();
+        if (reloadLogs)
+        {
+            LoadLogs();
+        }
+
         if (includeDiagnostics)
         {
             RefreshDiagnostics(logSnapshot: false);

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Principal;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Win32;
 
 namespace SleepSentinel.Services;
@@ -11,6 +12,8 @@ public static class AutostartManager
     private const string ValueName = "SleepSentinel";
     private const string ElevatedTaskName = "SleepSentinel Elevated Autostart";
     private const int ProcessTimeoutMilliseconds = 10000;
+    private static readonly Regex CliXmlEnvelopeRegex = new(@"#<\s*CLIXML\s*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex CliXmlPayloadRegex = new(@"<Objs[\s\S]*?</Objs>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public enum AutostartMode
     {
@@ -189,6 +192,7 @@ public static class AutostartManager
     private static ScheduledTaskInfo QueryScheduledTask()
     {
         const string script = """
+            $ProgressPreference = 'SilentlyContinue'
             $task = Get-ScheduledTask -TaskName 'SleepSentinel Elevated Autostart' -ErrorAction SilentlyContinue
             if ($null -eq $task) {
                 return
@@ -248,6 +252,7 @@ Register-ScheduledTask -TaskName '{ElevatedTaskName}' -Action $action -Trigger $
     private static void RemoveElevatedScheduledTask()
     {
         var script = $@"
+$ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
 if (Get-ScheduledTask -TaskName '{ElevatedTaskName}' -ErrorAction SilentlyContinue) {{
     Unregister-ScheduledTask -TaskName '{ElevatedTaskName}' -Confirm:$false | Out-Null
@@ -265,9 +270,10 @@ if (Get-ScheduledTask -TaskName '{ElevatedTaskName}' -ErrorAction SilentlyContin
         try
         {
             using var process = new Process();
-            var encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+            var effectiveScript = "$ProgressPreference = 'SilentlyContinue'" + Environment.NewLine + script;
+            var encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(effectiveScript));
             process.StartInfo.FileName = "powershell";
-            process.StartInfo.Arguments = $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encodedCommand}";
+            process.StartInfo.Arguments = $"-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encodedCommand}";
             process.StartInfo.CreateNoWindow = true;
             process.StartInfo.UseShellExecute = false;
             process.StartInfo.RedirectStandardOutput = true;
@@ -285,8 +291,8 @@ if (Get-ScheduledTask -TaskName '{ElevatedTaskName}' -ErrorAction SilentlyContin
             }
 
             Task.WaitAll([outputTask, errorTask], 1000);
-            var output = outputTask.IsCompletedSuccessfully ? outputTask.Result : string.Empty;
-            var error = errorTask.IsCompletedSuccessfully ? errorTask.Result : string.Empty;
+            var output = SanitizePowerShellStream(outputTask.IsCompletedSuccessfully ? outputTask.Result : string.Empty);
+            var error = SanitizePowerShellStream(errorTask.IsCompletedSuccessfully ? errorTask.Result : string.Empty);
 
             if (process.ExitCode == 0)
             {
@@ -307,6 +313,18 @@ if (Get-ScheduledTask -TaskName '{ElevatedTaskName}' -ErrorAction SilentlyContin
     private static string EscapePowerShellString(string value)
     {
         return value.Replace("'", "''", StringComparison.Ordinal);
+    }
+
+    private static string SanitizePowerShellStream(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var sanitized = CliXmlEnvelopeRegex.Replace(text, string.Empty);
+        sanitized = CliXmlPayloadRegex.Replace(sanitized, string.Empty);
+        return sanitized.Trim();
     }
 
     private static bool IsPowerShellFailure(string output)

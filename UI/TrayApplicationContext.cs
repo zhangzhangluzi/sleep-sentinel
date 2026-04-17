@@ -30,6 +30,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _startMinimizedMenuItem;
     private readonly ToolStripMenuItem _autostartMenuItem;
     private readonly EventHandler _stateChangedHandler;
+    private int _deferredWarmupScheduled;
     private bool _isExiting;
 
     public TrayApplicationContext(
@@ -223,13 +224,14 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void ShowMainForm()
     {
-        EnsureDeferredWarmupCompleted();
         var mainForm = EnsureMainForm();
         EnsureTrayIconVisible();
         mainForm.Show();
         mainForm.WindowState = FormWindowState.Normal;
+        mainForm.RefreshFromController();
         mainForm.BringToFront();
         mainForm.Activate();
+        StartDeferredWarmupInBackground();
     }
 
     private MainForm EnsureMainForm()
@@ -251,24 +253,6 @@ public sealed class TrayApplicationContext : ApplicationContext
         return _mainForm;
     }
 
-    private void EnsureDeferredWarmupCompleted()
-    {
-        _deferredWarmupTimer.Change(Timeout.Infinite, Timeout.Infinite);
-        if (_controller.StartupWarmupCompleted)
-        {
-            return;
-        }
-
-        try
-        {
-            _controller.CompleteDeferredStartupValidation();
-        }
-        catch (Exception ex)
-        {
-            _logger.Warn($"启动后延迟校验失败：{ex.Message}");
-        }
-    }
-
     private void OnDeferredWarmupTimerElapsed()
     {
         if (_isExiting)
@@ -276,13 +260,50 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
+        StartDeferredWarmupInBackground();
+    }
+
+    private void StartDeferredWarmupInBackground()
+    {
+        _deferredWarmupTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        if (_controller.StartupWarmupCompleted)
+        {
+            return;
+        }
+
+        if (System.Threading.Interlocked.Exchange(ref _deferredWarmupScheduled, 1) != 0)
+        {
+            return;
+        }
+
         try
         {
-            _controller.CompleteDeferredStartupValidation();
+            System.Threading.ThreadPool.UnsafeQueueUserWorkItem(
+                static state =>
+                {
+                    var context = (TrayApplicationContext)state!;
+                    try
+                    {
+                        context._controller.CompleteDeferredStartupValidation();
+                    }
+                    catch (Exception ex)
+                    {
+                        context._logger.Warn($"启动后后台校验失败：{ex.Message}");
+                    }
+                    finally
+                    {
+                        if (!context._controller.StartupWarmupCompleted)
+                        {
+                            System.Threading.Interlocked.Exchange(ref context._deferredWarmupScheduled, 0);
+                        }
+                    }
+                },
+                this);
         }
         catch (Exception ex)
         {
-            _logger.Warn($"启动后后台校验失败：{ex.Message}");
+            System.Threading.Interlocked.Exchange(ref _deferredWarmupScheduled, 0);
+            _logger.Warn($"启动后后台校验启动失败：{ex.Message}");
         }
     }
 

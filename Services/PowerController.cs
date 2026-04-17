@@ -11,7 +11,7 @@ namespace SleepSentinel.Services;
 public sealed class PowerController : IDisposable
 {
     private static readonly TimeSpan ManualResumeSignalWindow = TimeSpan.FromSeconds(20);
-    private static readonly TimeSpan StatusSnapshotMaxAge = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan StatusSnapshotMaxAge = TimeSpan.FromSeconds(3);
     private const int ResumeAnalysisDelayMilliseconds = 1500;
     private const int DefaultBatteryStandbyHibernateTimeoutSeconds = 600;
     private const int PowerShellTimeoutMilliseconds = 10000;
@@ -142,6 +142,7 @@ public sealed class PowerController : IDisposable
     private string _lastManualResumeSignalReason = "人工操作";
     private string _activePowerPlanKey = string.Empty;
     private bool _startupWarmupCompleted;
+    private bool _startupWarmupInProgress;
     private uint? _resumeProtectionArmedAtTick;
     private int _resumeEvaluationGeneration;
     private bool _disposed;
@@ -585,13 +586,22 @@ public sealed class PowerController : IDisposable
 
     public void CompleteDeferredStartupValidation()
     {
+        var shouldNotify = false;
+
         lock (_stateSync)
         {
-            if (_startupWarmupCompleted)
+            if (_startupWarmupCompleted || _startupWarmupInProgress)
             {
                 return;
             }
 
+            _startupWarmupInProgress = true;
+        }
+
+        try
+        {
+            lock (_stateSync)
+            {
             _logger.Info("正在补全启动后的延迟状态校验。");
 
             RefreshWakeTimerPolicySummary();
@@ -599,11 +609,24 @@ public sealed class PowerController : IDisposable
             RefreshWiFiDirectAdapterPolicySummary();
             RefreshBatteryStandbyHibernatePolicySummary();
             RefreshKnownRemoteWakePolicySummary();
-            EnsureAutostartMatchesSettings();
+                RefreshAutostartPolicySummary();
 
             _startupWarmupCompleted = true;
-            InvalidateStatusSnapshot();
-            SaveSettingsSnapshot();
+                shouldNotify = true;
+                InvalidateStatusSnapshot();
+                SaveSettingsSnapshot();
+            }
+        }
+        finally
+        {
+            lock (_stateSync)
+            {
+                _startupWarmupInProgress = false;
+            }
+        }
+
+        if (shouldNotify)
+        {
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
     }
@@ -1685,6 +1708,25 @@ public sealed class PowerController : IDisposable
             SaveSettingsSnapshot();
             _logger.Warn(_settings.AutostartPolicySummary);
         }
+    }
+
+    private void RefreshAutostartPolicySummary()
+    {
+        var requireElevatedAutostart = RequiresElevatedAutostart();
+        var status = AutostartManager.QueryStatus(_settings.StartWithWindows, requireElevatedAutostart);
+        if (!string.Equals(_settings.AutostartPolicySummary, status.Summary, StringComparison.Ordinal))
+        {
+            if (status.VerificationFailed)
+            {
+                _logger.Warn(status.Summary);
+            }
+            else
+            {
+                _logger.Info(status.Summary);
+            }
+        }
+
+        _settings.AutostartPolicySummary = status.Summary;
     }
 
     private bool RequiresElevatedAutostart()
