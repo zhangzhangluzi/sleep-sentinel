@@ -6,10 +6,11 @@ namespace SleepSentinel.UI;
 
 public sealed class TrayApplicationContext : ApplicationContext
 {
+    private const int DeferredWarmupDelayMilliseconds = 20000;
     private readonly PowerController _controller;
     private readonly FileLogger _logger;
     private readonly NotifyIcon _notifyIcon;
-    private readonly MainForm _mainForm;
+    private MainForm? _mainForm;
     private readonly Icon _appIcon;
     private readonly SettingsStore _settingsStore;
     private readonly EventWaitHandle _activationSignal;
@@ -17,6 +18,8 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly RegisteredWaitHandle _activationWaitHandle;
     private readonly RegisteredWaitHandle _takeoverWaitHandle;
     private readonly TrayMessageWindow _trayMessageWindow;
+    private readonly Control _uiInvoker;
+    private readonly System.Threading.Timer _deferredWarmupTimer;
     private readonly DiagnosticReportService _diagnosticReportService;
     private readonly ToolStripMenuItem _followPowerPlanMenuItem;
     private readonly ToolStripMenuItem _keepAwakeMenuItem;
@@ -44,16 +47,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         _activationSignal = activationSignal;
         _takeoverSignal = takeoverSignal;
         _diagnosticReportService = new DiagnosticReportService(settingsStore, logger, controller);
-
-        _mainForm = new MainForm(controller, logger, settingsStore, _appIcon);
-        _mainForm.FormClosed += (_, _) =>
-        {
-            if (_mainForm.Visible)
-            {
-                _mainForm.Hide();
-            }
-        };
-        _ = _mainForm.Handle;
+        _uiInvoker = new Control();
+        _ = _uiInvoker.Handle;
         _trayMessageWindow = new TrayMessageWindow(OnTaskbarCreated);
 
         var menu = new ContextMenuStrip();
@@ -197,6 +192,11 @@ public sealed class TrayApplicationContext : ApplicationContext
             this,
             Timeout.Infinite,
             false);
+        _deferredWarmupTimer = new System.Threading.Timer(
+            static state => ((TrayApplicationContext)state!).OnDeferredWarmupTimerElapsed(),
+            this,
+            DeferredWarmupDelayMilliseconds,
+            Timeout.Infinite);
         RefreshTrayText();
 
         if (!_controller.CurrentSettings.StartMinimized)
@@ -211,21 +211,79 @@ public sealed class TrayApplicationContext : ApplicationContext
         _controller.StateChanged -= _stateChangedHandler;
         _activationWaitHandle.Unregister(null);
         _takeoverWaitHandle.Unregister(null);
+        _deferredWarmupTimer.Dispose();
         _trayMessageWindow.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
-        _mainForm.Dispose();
+        _mainForm?.Dispose();
+        _uiInvoker.Dispose();
         _appIcon.Dispose();
         base.ExitThreadCore();
     }
 
     private void ShowMainForm()
     {
+        EnsureDeferredWarmupCompleted();
+        var mainForm = EnsureMainForm();
         EnsureTrayIconVisible();
-        _mainForm.Show();
-        _mainForm.WindowState = FormWindowState.Normal;
-        _mainForm.BringToFront();
-        _mainForm.Activate();
+        mainForm.Show();
+        mainForm.WindowState = FormWindowState.Normal;
+        mainForm.BringToFront();
+        mainForm.Activate();
+    }
+
+    private MainForm EnsureMainForm()
+    {
+        if (_mainForm is not null && !_mainForm.IsDisposed)
+        {
+            return _mainForm;
+        }
+
+        _mainForm = new MainForm(_controller, _logger, _settingsStore, _appIcon);
+        _mainForm.FormClosed += (_, _) =>
+        {
+            if (_mainForm is not null && _mainForm.Visible)
+            {
+                _mainForm.Hide();
+            }
+        };
+
+        return _mainForm;
+    }
+
+    private void EnsureDeferredWarmupCompleted()
+    {
+        _deferredWarmupTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        if (_controller.StartupWarmupCompleted)
+        {
+            return;
+        }
+
+        try
+        {
+            _controller.CompleteDeferredStartupValidation();
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"启动后延迟校验失败：{ex.Message}");
+        }
+    }
+
+    private void OnDeferredWarmupTimerElapsed()
+    {
+        if (_isExiting)
+        {
+            return;
+        }
+
+        try
+        {
+            _controller.CompleteDeferredStartupValidation();
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"启动后后台校验失败：{ex.Message}");
+        }
     }
 
     private void RefreshTrayText()
@@ -233,7 +291,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         var text = $"SleepSentinel - {_controller.CurrentStatus}";
         _notifyIcon.Text = text.Length > 63 ? text[..63] : text;
         _notifyIcon.BalloonTipTitle = "SleepSentinel";
-        _notifyIcon.BalloonTipText = _controller.CurrentRiskSummary;
+        _notifyIcon.BalloonTipText = _controller.StartupWarmupCompleted
+            ? _controller.CurrentRiskSummary
+            : "SleepSentinel 已启动，详细状态会在后台补全。";
         _followPowerPlanMenuItem.Checked = _controller.CurrentSettings.PolicyMode == PowerPolicyMode.FollowPowerPlan;
         _keepAwakeMenuItem.Checked = _controller.CurrentSettings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely;
         _wakeTimersMenuItem.Checked = _controller.CurrentSettings.DisableWakeTimers;
@@ -246,21 +306,21 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void RefreshTrayTextOnUiThread()
     {
-        if (_isExiting || _mainForm.IsDisposed)
+        if (_isExiting)
         {
             return;
         }
 
-        if (!_mainForm.IsHandleCreated)
+        if (!_uiInvoker.IsHandleCreated)
         {
             return;
         }
 
-        if (_mainForm.InvokeRequired)
+        if (_uiInvoker.InvokeRequired)
         {
             try
             {
-                _mainForm.BeginInvoke(new Action(RefreshTrayTextOnUiThread));
+                _uiInvoker.BeginInvoke(new Action(RefreshTrayTextOnUiThread));
             }
             catch (InvalidOperationException)
             {
@@ -294,16 +354,16 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void OnExternalActivationRequested()
     {
-        if (_isExiting || _mainForm.IsDisposed || !_mainForm.IsHandleCreated)
+        if (_isExiting || !_uiInvoker.IsHandleCreated)
         {
             return;
         }
 
         try
         {
-            _mainForm.BeginInvoke(new Action(() =>
+            _uiInvoker.BeginInvoke(new Action(() =>
             {
-                if (_isExiting || _mainForm.IsDisposed)
+                if (_isExiting)
                 {
                     return;
                 }
@@ -319,16 +379,16 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void OnTakeoverRequested()
     {
-        if (_isExiting || _mainForm.IsDisposed || !_mainForm.IsHandleCreated)
+        if (_isExiting || !_uiInvoker.IsHandleCreated)
         {
             return;
         }
 
         try
         {
-            _mainForm.BeginInvoke(new Action(() =>
+            _uiInvoker.BeginInvoke(new Action(() =>
             {
-                if (_isExiting || _mainForm.IsDisposed)
+                if (_isExiting)
                 {
                     return;
                 }
@@ -344,16 +404,16 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void OnTaskbarCreated()
     {
-        if (_isExiting || _mainForm.IsDisposed || !_mainForm.IsHandleCreated)
+        if (_isExiting || !_uiInvoker.IsHandleCreated)
         {
             return;
         }
 
         try
         {
-            _mainForm.BeginInvoke(new Action(() =>
+            _uiInvoker.BeginInvoke(new Action(() =>
             {
-                if (_isExiting || _mainForm.IsDisposed)
+                if (_isExiting)
                 {
                     return;
                 }

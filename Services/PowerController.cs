@@ -141,6 +141,7 @@ public sealed class PowerController : IDisposable
     private DateTimeOffset? _lastManualResumeSignalUtc;
     private string _lastManualResumeSignalReason = "人工操作";
     private string _activePowerPlanKey = string.Empty;
+    private bool _startupWarmupCompleted;
     private uint? _resumeProtectionArmedAtTick;
     private int _resumeEvaluationGeneration;
     private bool _disposed;
@@ -191,7 +192,7 @@ public sealed class PowerController : IDisposable
         }
         else
         {
-            RefreshWakeTimerPolicySummary();
+            _settings.WakeTimerPolicySummary = "未由应用接管；启动时跳过即时核验";
         }
         if (_settings.DisableStandbyConnectivity)
         {
@@ -199,7 +200,7 @@ public sealed class PowerController : IDisposable
         }
         else
         {
-            RefreshStandbyConnectivityPolicySummary();
+            _settings.StandbyConnectivityPolicySummary = "未由应用接管；启动时跳过即时核验";
         }
         if (_settings.DisableWiFiDirectAdapters)
         {
@@ -207,7 +208,7 @@ public sealed class PowerController : IDisposable
         }
         else
         {
-            RefreshWiFiDirectAdapterPolicySummary();
+            _settings.WiFiDirectAdapterPolicySummary = "未由应用接管；启动时跳过即时核验";
         }
         if (_settings.EnforceBatteryStandbyHibernate)
         {
@@ -216,7 +217,7 @@ public sealed class PowerController : IDisposable
         }
         else
         {
-            RefreshBatteryStandbyHibernatePolicySummary();
+            _settings.BatteryStandbyHibernatePolicySummary = "未由应用接管；启动时跳过即时核验";
         }
         if (_settings.BlockKnownRemoteWakeRequests)
         {
@@ -224,9 +225,11 @@ public sealed class PowerController : IDisposable
         }
         else
         {
-            RefreshKnownRemoteWakePolicySummary();
+            _settings.KnownRemoteWakePolicySummary = "未由应用接管；启动时跳过即时核验";
         }
-        EnsureAutostartMatchesSettings();
+        _settings.AutostartPolicySummary = _settings.StartWithWindows
+            ? "开机自启已启用；启动时跳过即时核验"
+            : "开机自启未启用";
         SaveSettingsSnapshot();
         InvalidateStatusSnapshot();
         _logger.Info($"应用启动，当前模式：{DescribeMode(_settings.PolicyMode)}。");
@@ -236,17 +239,21 @@ public sealed class PowerController : IDisposable
 
     public AppSettings CurrentSettings => CloneCurrentSettings();
 
-    public string CurrentStatus => GetStatusSnapshot().CurrentStatus;
+    public string CurrentStatus => BuildCurrentStatus();
 
-    public string CurrentProtectionRuleSummary => GetStatusSnapshot().ProtectionRuleSummary;
+    public string CurrentProtectionRuleSummary => BuildProtectionRuleSummary();
 
-    public string CurrentCapabilitySummary => GetStatusSnapshot().CapabilitySummary;
+    public string CurrentCapabilitySummary => _startupWarmupCompleted
+        ? GetStatusSnapshot().CapabilitySummary
+        : BuildDeferredCapabilitySummary();
 
-    public string CurrentRiskSummary => GetStatusSnapshot().RiskSummary;
+    public string CurrentRiskSummary => _startupWarmupCompleted
+        ? GetStatusSnapshot().RiskSummary
+        : BuildDeferredRiskSummary();
 
     public string CurrentPowerPlanSummary => GetStatusSnapshot().PowerPlanSummary;
 
-    public string CurrentManagedRemoteEntriesSummary => GetStatusSnapshot().ManagedRemoteEntriesSummary;
+    public string CurrentManagedRemoteEntriesSummary => BuildManagedRemoteEntriesSummary();
 
     public string CurrentWakeTimerQuickState => GetStatusSnapshot().WakeTimerQuickState;
 
@@ -257,6 +264,17 @@ public sealed class PowerController : IDisposable
     public string CurrentBatteryStandbyHibernateQuickState => GetStatusSnapshot().BatteryStandbyHibernateQuickState;
 
     public string CurrentRemoteWakeQuickState => GetStatusSnapshot().RemoteWakeQuickState;
+
+    public bool StartupWarmupCompleted
+    {
+        get
+        {
+            lock (_stateSync)
+            {
+                return _startupWarmupCompleted;
+            }
+        }
+    }
 
     private StatusSnapshot GetStatusSnapshot()
     {
@@ -561,6 +579,31 @@ public sealed class PowerController : IDisposable
             EnsureAutostartMatchesSettings();
             SaveSettingsSnapshot();
             _logger.Info("已重新应用当前全部设置。");
+            StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    public void CompleteDeferredStartupValidation()
+    {
+        lock (_stateSync)
+        {
+            if (_startupWarmupCompleted)
+            {
+                return;
+            }
+
+            _logger.Info("正在补全启动后的延迟状态校验。");
+
+            RefreshWakeTimerPolicySummary();
+            RefreshStandbyConnectivityPolicySummary();
+            RefreshWiFiDirectAdapterPolicySummary();
+            RefreshBatteryStandbyHibernatePolicySummary();
+            RefreshKnownRemoteWakePolicySummary();
+            EnsureAutostartMatchesSettings();
+
+            _startupWarmupCompleted = true;
+            InvalidateStatusSnapshot();
+            SaveSettingsSnapshot();
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
     }
@@ -2523,6 +2566,29 @@ public sealed class PowerController : IDisposable
         return string.Join("；", parts) + "。";
     }
 
+    private string BuildDeferredCapabilitySummary()
+    {
+        var parts = new List<string>
+        {
+            IsRunningElevated()
+                ? "当前以管理员权限运行"
+                : "当前未以管理员权限运行"
+        };
+
+        if (_settings.StartWithWindows && !string.IsNullOrWhiteSpace(_settings.AutostartPolicySummary))
+        {
+            parts.Add($"开机自启：{_settings.AutostartPolicySummary}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_settingsStore.LastSaveError))
+        {
+            parts.Add("最近一次配置写入失败，当前变更可能仅在本次运行有效");
+        }
+
+        parts.Add("启动后详细校验尚未完成");
+        return string.Join("；", parts) + "。";
+    }
+
     private ProtectionStatus EvaluateWakeTimerProtection()
     {
         if (!TryGetCurrentWakeTimerIndices(out var acValue, out var dcValue))
@@ -2699,6 +2765,29 @@ public sealed class PowerController : IDisposable
         return risks.Count == 0
             ? "当前保护层完整，没有明显高风险缺口。"
             : $"当前最主要风险：{string.Join("；", risks.Take(3))}。";
+    }
+
+    private string BuildDeferredRiskSummary()
+    {
+        var risks = new List<string>();
+
+        if (_settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely)
+        {
+            risks.Add("当前处于无限保持唤醒模式");
+        }
+        else if (!_settings.ResumeProtectionEnabled)
+        {
+            risks.Add("恢复保护已关闭");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_settingsStore.LastSaveError))
+        {
+            risks.Add("最近一次配置写入失败，重启后部分变更可能丢失");
+        }
+
+        risks.Add("启动后详细校验尚未完成");
+
+        return $"当前最主要风险：{string.Join("；", risks.Take(3))}。";
     }
 
     private string BuildPowerPlanSummary()
