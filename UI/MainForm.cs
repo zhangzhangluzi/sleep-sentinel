@@ -822,14 +822,25 @@ public sealed class MainForm : Form
             return;
         }
 
-        _settingsStore.Update(settings =>
+        try
         {
-            settings.WindowBoundsCaptured = true;
-            settings.WindowWidth = bounds.Width;
-            settings.WindowHeight = bounds.Height;
-            settings.WindowX = bounds.X;
-            settings.WindowY = bounds.Y;
-        });
+            _settingsStore.Update(settings =>
+            {
+                settings.WindowBoundsCaptured = true;
+                settings.WindowWidth = bounds.Width;
+                settings.WindowHeight = bounds.Height;
+                settings.WindowX = bounds.X;
+                settings.WindowY = bounds.Y;
+            });
+        }
+        catch (IOException ex)
+        {
+            _logger.Warn($"保存窗口尺寸失败：{ex.Message}");
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger.Warn($"保存窗口尺寸被拒绝：{ex.Message}");
+        }
     }
 
     private static IReadOnlyList<string> ParseCustomRemoteWakeEntries(string text)

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text;
+using System.Diagnostics;
 using SleepSentinel.Models;
 
 namespace SleepSentinel.Services;
@@ -19,6 +20,7 @@ public sealed class SettingsStore
 
     public string SettingsPath => Path.Combine(BaseDirectory, "settings.json");
     public string LastKnownGoodSettingsPath => Path.Combine(BaseDirectory, "settings.last-good.json");
+    public string? LastSaveError { get; private set; }
 
     public AppSettings Load()
     {
@@ -34,7 +36,7 @@ public sealed class SettingsStore
     {
         lock (_sync)
         {
-            SaveUnsafe(settings);
+            TrySaveUnsafe(settings);
         }
     }
 
@@ -44,7 +46,7 @@ public sealed class SettingsStore
         {
             var settings = _cachedSettings?.Clone() ?? LoadUnsafe();
             mutation(settings);
-            SaveUnsafe(settings);
+            TrySaveUnsafe(settings);
             return settings.Clone();
         }
     }
@@ -137,6 +139,30 @@ public sealed class SettingsStore
 
         TryWriteLastKnownGoodUnsafe(json);
         _cachedSettings = settings.Clone();
+    }
+
+    private void TrySaveUnsafe(AppSettings settings)
+    {
+        try
+        {
+            SaveUnsafe(settings);
+            LastSaveError = null;
+        }
+        catch (IOException ex)
+        {
+            RememberSaveFailure(settings, ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            RememberSaveFailure(settings, ex);
+        }
+    }
+
+    private void RememberSaveFailure(AppSettings settings, Exception ex)
+    {
+        _cachedSettings = settings.Clone();
+        LastSaveError = ex.Message;
+        Debug.WriteLine($"SleepSentinel settings save failed: {ex.Message}");
     }
 
     private AppSettings? ReadSettingsFileUnsafe(string path)
