@@ -22,6 +22,7 @@ public sealed class DiagnosticReportService
 
         var timestamp = DateTime.Now;
         var reportPath = Path.Combine(reportsDirectory, $"diagnostic-report-{timestamp:yyyyMMdd-HHmmss}.txt");
+        var tempPath = reportPath + ".tmp";
         var settings = _controller.CurrentSettings;
         var recentLogs = _logger.ReadRecent(400);
         var snapshot = _controller.CollectWakeDiagnosticSnapshot(includePowerRequests: true, includeSleepStudy: true);
@@ -106,7 +107,36 @@ public sealed class DiagnosticReportService
             builder.AppendLine(line);
         }
 
-        File.WriteAllText(reportPath, builder.ToString(), Encoding.UTF8);
+        try
+        {
+            File.WriteAllText(tempPath, builder.ToString(), Encoding.UTF8);
+            File.Move(tempPath, reportPath, true);
+        }
+        catch (IOException ex)
+        {
+            throw new InvalidOperationException($"写入诊断报告失败：{ex.Message}", ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new InvalidOperationException($"写入诊断报告被拒绝：{ex.Message}", ex);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
         _logger.Info($"已导出诊断报告：{reportPath}");
         return reportPath;
     }

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text;
 using SleepSentinel.Models;
 
 namespace SleepSentinel.Services;
@@ -124,8 +125,16 @@ public sealed class SettingsStore
 
         var tempPath = SettingsPath + ".tmp";
         var json = JsonSerializer.Serialize(settings, SerializerOptions);
-        File.WriteAllText(tempPath, json);
-        File.Move(tempPath, SettingsPath, true);
+        try
+        {
+            File.WriteAllText(tempPath, json, Encoding.UTF8);
+            File.Move(tempPath, SettingsPath, true);
+        }
+        finally
+        {
+            TryDeleteTempFile(tempPath);
+        }
+
         TryWriteLastKnownGoodUnsafe(json);
         _cachedSettings = settings.Clone();
     }
@@ -189,9 +198,32 @@ public sealed class SettingsStore
 
     private void TryWriteLastKnownGoodUnsafe(string json)
     {
+        var tempPath = LastKnownGoodSettingsPath + ".tmp";
         try
         {
-            File.WriteAllText(LastKnownGoodSettingsPath, json);
+            File.WriteAllText(tempPath, json, Encoding.UTF8);
+            File.Move(tempPath, LastKnownGoodSettingsPath, true);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+        finally
+        {
+            TryDeleteTempFile(tempPath);
+        }
+    }
+
+    private static void TryDeleteTempFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
         }
         catch (IOException)
         {

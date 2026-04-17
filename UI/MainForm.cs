@@ -634,7 +634,19 @@ public sealed class MainForm : Form
 
         if (InvokeRequired)
         {
-            BeginInvoke(new Action(RefreshStatusAndDetails));
+            if (!IsHandleCreated)
+            {
+                return;
+            }
+
+            try
+            {
+                BeginInvoke(new Action(RefreshStatusAndDetails));
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
             return;
         }
 
@@ -677,7 +689,19 @@ public sealed class MainForm : Form
 
         if (InvokeRequired)
         {
-            BeginInvoke(new Action(() => OnLogWritten(sender, line)));
+            if (!IsHandleCreated)
+            {
+                return;
+            }
+
+            try
+            {
+                BeginInvoke(new Action(() => OnLogWritten(sender, line)));
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
             return;
         }
 
@@ -733,7 +757,19 @@ public sealed class MainForm : Form
 
         if (InvokeRequired)
         {
-            BeginInvoke(new Action(() => SyncUiFromController(includeDiagnostics)));
+            if (!IsHandleCreated)
+            {
+                return;
+            }
+
+            try
+            {
+                BeginInvoke(new Action(() => SyncUiFromController(includeDiagnostics)));
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
             return;
         }
 

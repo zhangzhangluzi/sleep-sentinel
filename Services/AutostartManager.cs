@@ -352,7 +352,19 @@ if (Get-ScheduledTask -TaskName '{ElevatedTaskName}' -ErrorAction SilentlyContin
         {
             return Path.GetFullPath(executablePath);
         }
-        catch (Exception)
+        catch (ArgumentException)
+        {
+            return executablePath;
+        }
+        catch (NotSupportedException)
+        {
+            return executablePath;
+        }
+        catch (PathTooLongException)
+        {
+            return executablePath;
+        }
+        catch (System.Security.SecurityException)
         {
             return executablePath;
         }

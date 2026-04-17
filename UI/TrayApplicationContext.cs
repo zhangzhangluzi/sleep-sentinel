@@ -61,11 +61,11 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
 
         _followPowerPlanMenuItem = new ToolStripMenuItem("遵循电源计划");
-        _followPowerPlanMenuItem.Click += (_, _) => _controller.SetPolicyMode(PowerPolicyMode.FollowPowerPlan);
+        _followPowerPlanMenuItem.Click += (_, _) => RunTrayAction("切换为遵循电源计划", () => _controller.SetPolicyMode(PowerPolicyMode.FollowPowerPlan));
         menu.Items.Add(_followPowerPlanMenuItem);
 
         _keepAwakeMenuItem = new ToolStripMenuItem("无限保持唤醒（类似 PowerToys Awake）");
-        _keepAwakeMenuItem.Click += (_, _) => _controller.SetPolicyMode(PowerPolicyMode.KeepAwakeIndefinitely);
+        _keepAwakeMenuItem.Click += (_, _) => RunTrayAction("切换为无限保持唤醒", () => _controller.SetPolicyMode(PowerPolicyMode.KeepAwakeIndefinitely));
         menu.Items.Add(_keepAwakeMenuItem);
 
         menu.Items.Add(new ToolStripSeparator());
@@ -73,86 +73,104 @@ public sealed class TrayApplicationContext : ApplicationContext
         _wakeTimersMenuItem = new ToolStripMenuItem("接管唤醒定时器");
         _wakeTimersMenuItem.Click += (_, _) =>
         {
-            if (_controller.CurrentSettings.DisableWakeTimers)
+            RunTrayAction("切换唤醒定时器接管", () =>
             {
-                _controller.RestoreSoftwareWake();
-            }
-            else
-            {
-                _controller.BlockSoftwareWake();
-            }
+                if (_controller.CurrentSettings.DisableWakeTimers)
+                {
+                    _controller.RestoreSoftwareWake();
+                }
+                else
+                {
+                    _controller.BlockSoftwareWake();
+                }
+            });
         };
         menu.Items.Add(_wakeTimersMenuItem);
 
         _standbyConnectivityMenuItem = new ToolStripMenuItem("接管待机联网");
         _standbyConnectivityMenuItem.Click += (_, _) =>
         {
-            if (_controller.CurrentSettings.DisableStandbyConnectivity)
+            RunTrayAction("切换待机联网接管", () =>
             {
-                _controller.RestoreStandbyConnectivityWake();
-            }
-            else
-            {
-                _controller.BlockStandbyConnectivityWake();
-            }
+                if (_controller.CurrentSettings.DisableStandbyConnectivity)
+                {
+                    _controller.RestoreStandbyConnectivityWake();
+                }
+                else
+                {
+                    _controller.BlockStandbyConnectivityWake();
+                }
+            });
         };
         menu.Items.Add(_standbyConnectivityMenuItem);
 
         _batteryFallbackMenuItem = new ToolStripMenuItem("接管电池兜底休眠");
         _batteryFallbackMenuItem.Click += (_, _) =>
         {
-            if (_controller.CurrentSettings.EnforceBatteryStandbyHibernate)
+            RunTrayAction("切换电池兜底休眠接管", () =>
             {
-                _controller.RestoreBatteryStandbyHibernateFallback();
-            }
-            else
-            {
-                _controller.EnableBatteryStandbyHibernateFallback();
-            }
+                if (_controller.CurrentSettings.EnforceBatteryStandbyHibernate)
+                {
+                    _controller.RestoreBatteryStandbyHibernateFallback();
+                }
+                else
+                {
+                    _controller.EnableBatteryStandbyHibernateFallback();
+                }
+            });
         };
         menu.Items.Add(_batteryFallbackMenuItem);
 
         _remoteWakeMenuItem = new ToolStripMenuItem("接管远控保活拦截");
         _remoteWakeMenuItem.Click += (_, _) =>
         {
-            if (_controller.CurrentSettings.BlockKnownRemoteWakeRequests)
+            RunTrayAction("切换远控保活拦截接管", () =>
             {
-                _controller.RestoreKnownRemoteWakeRequests();
-            }
-            else
-            {
-                _controller.BlockKnownRemoteWakeRequests();
-            }
+                if (_controller.CurrentSettings.BlockKnownRemoteWakeRequests)
+                {
+                    _controller.RestoreKnownRemoteWakeRequests();
+                }
+                else
+                {
+                    _controller.BlockKnownRemoteWakeRequests();
+                }
+            });
         };
         menu.Items.Add(_remoteWakeMenuItem);
 
         menu.Items.Add(new ToolStripSeparator());
 
         _startMinimizedMenuItem = new ToolStripMenuItem("启动后仅驻留托盘");
-        _startMinimizedMenuItem.Click += (_, _) => ToggleSetting(static settings => settings.StartMinimized = !settings.StartMinimized);
+        _startMinimizedMenuItem.Click += (_, _) => RunTrayAction("切换启动后仅驻留托盘", () => ToggleSetting(static settings => settings.StartMinimized = !settings.StartMinimized));
         menu.Items.Add(_startMinimizedMenuItem);
 
         _autostartMenuItem = new ToolStripMenuItem("开机自启");
-        _autostartMenuItem.Click += (_, _) => ToggleSetting(static settings => settings.StartWithWindows = !settings.StartWithWindows);
+        _autostartMenuItem.Click += (_, _) => RunTrayAction("切换开机自启", () => ToggleSetting(static settings => settings.StartWithWindows = !settings.StartWithWindows));
         menu.Items.Add(_autostartMenuItem);
 
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("记录唤醒诊断", null, (_, _) =>
         {
-            var diagnostics = _controller.CollectFullWakeDiagnosticsText();
-            _logger.Warn("用户从托盘菜单手动收集唤醒诊断。");
-            _logger.Warn(diagnostics);
+            RunTrayAction("记录唤醒诊断", () =>
+            {
+                var diagnostics = _controller.CollectFullWakeDiagnosticsText();
+                _logger.Warn("用户从托盘菜单手动收集唤醒诊断。");
+                _logger.Warn(diagnostics);
+            });
         });
         menu.Items.Add("导出诊断报告", null, (_, _) =>
         {
-            var path = _diagnosticReportService.Export();
-            ShowTrayBalloon($"诊断报告已导出：{path}", ToolTipIcon.Info);
+            RunTrayAction("导出诊断报告", () =>
+            {
+                var path = _diagnosticReportService.Export();
+                ShowTrayBalloon($"诊断报告已导出：{path}", ToolTipIcon.Info);
+            });
         });
-        menu.Items.Add("重新应用全部设置", null, (_, _) => _controller.ReapplyAllManagedSettings());
+        menu.Items.Add("重新应用全部设置", null, (_, _) => RunTrayAction("重新应用全部设置", () => _controller.ReapplyAllManagedSettings()));
 
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("立即睡眠", null, (_, _) => _controller.SleepNow());
-        menu.Items.Add("立即休眠", null, (_, _) => _controller.HibernateNow());
+        menu.Items.Add("立即睡眠", null, (_, _) => RunTrayAction("立即睡眠", () => _controller.SleepNow()));
+        menu.Items.Add("立即休眠", null, (_, _) => RunTrayAction("立即休眠", () => _controller.HibernateNow()));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => ExitThread());
 
@@ -240,7 +258,14 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         if (_mainForm.InvokeRequired)
         {
-            _mainForm.BeginInvoke(new Action(RefreshTrayTextOnUiThread));
+            try
+            {
+                _mainForm.BeginInvoke(new Action(RefreshTrayTextOnUiThread));
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
             return;
         }
 
@@ -252,6 +277,19 @@ public sealed class TrayApplicationContext : ApplicationContext
         var updatedSettings = _controller.CurrentSettings;
         mutation(updatedSettings);
         _controller.UpdateSettings(updatedSettings);
+    }
+
+    private void RunTrayAction(string actionName, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex)
+        {
+            _logger.Error($"托盘操作失败（{actionName}）：{ex.Message}");
+            ShowTrayBalloon($"{actionName}失败：{ex.Message}", ToolTipIcon.Error);
+        }
     }
 
     private void OnExternalActivationRequested()
