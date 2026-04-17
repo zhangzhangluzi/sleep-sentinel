@@ -14,4 +14,23 @@ public sealed class PowerPlanRestoreSnapshot
     public bool BatteryStandbyHibernateCaptured { get; set; }
     public int BatteryStandbyHibernateAcValue { get; set; }
     public int BatteryStandbyHibernateDcValue { get; set; }
+
+    public PowerPlanRestoreSnapshot Clone()
+    {
+        return new PowerPlanRestoreSnapshot
+        {
+            PlanName = PlanName,
+            WakeTimerCaptured = WakeTimerCaptured,
+            WakeTimerAcValue = WakeTimerAcValue,
+            WakeTimerDcValue = WakeTimerDcValue,
+            StandbyConnectivityCaptured = StandbyConnectivityCaptured,
+            StandbyConnectivityAcValue = StandbyConnectivityAcValue,
+            StandbyConnectivityDcValue = StandbyConnectivityDcValue,
+            DisconnectedStandbyModeAcValue = DisconnectedStandbyModeAcValue,
+            DisconnectedStandbyModeDcValue = DisconnectedStandbyModeDcValue,
+            BatteryStandbyHibernateCaptured = BatteryStandbyHibernateCaptured,
+            BatteryStandbyHibernateAcValue = BatteryStandbyHibernateAcValue,
+            BatteryStandbyHibernateDcValue = BatteryStandbyHibernateDcValue
+        };
+    }
 }

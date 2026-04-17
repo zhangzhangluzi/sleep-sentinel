@@ -15,7 +15,7 @@ SleepSentinel 是一个 Windows 托盘常驻工具，目标是解决两类场景
   - 监听系统 `Suspend/Resume`
   - 记录 `powercfg /lastwake` 和 `powercfg /waketimers`
   - 支持“仅对疑似非人工唤醒执行保护”
-  - 在恢复后延迟几秒，自动再次睡眠或休眠
+  - 在恢复后延迟几秒，自动再次睡眠、休眠或锁屏
 - 可选接管当前电源计划，把 `Wake Timers` 设为禁用
 - 本地日志
 - 一键导出诊断报告
@@ -27,8 +27,8 @@ SleepSentinel 是一个 Windows 托盘常驻工具，目标是解决两类场景
 这个工具可以做到的是：
 
 - 在 `无限保持唤醒` 模式下阻止系统按空闲策略自动睡眠。
-- 在 `遵循电源计划` 模式下，系统一旦被外部程序、唤醒定时器或设备唤醒，自动记录原因并再次睡眠/休眠。
-- 可以根据 `powercfg` 输出做启发式判断，疑似人工唤醒时跳过自动回睡。
+- 在 `遵循电源计划` 模式下，系统一旦被外部程序、唤醒定时器或设备唤醒，自动记录原因并按设置执行睡眠、休眠或锁屏。
+- 可以根据 `powercfg` 输出做启发式判断，疑似人工唤醒时跳过自动恢复保护动作。
 - 可选对当前电源计划执行 `powercfg /setacvalueindex scheme_current sub_sleep rtcwake 0` 和 `setdcvalueindex ... rtcwake 0`，直接禁用唤醒定时器。
 - 可把当前设置、最近日志和 `powercfg` 唤醒诊断导出为文本报告，便于排查或发给别人分析。
 
@@ -63,7 +63,8 @@ bin\Release\net8.0-windows\win-x64\publish\
 
 GitHub Release 也会自动附带：
 
-- `SleepSentinel-Setup-win-x64.exe`
+- `SleepSentinel-Setup-v<版本>-win-x64.exe`
+- `SleepSentinel-v<版本>-win-x64.exe`
 - 正常安装、开始菜单快捷方式、卸载入口
 
 ## GitHub 下载
@@ -71,7 +72,7 @@ GitHub Release 也会自动附带：
 仓库接入了 GitHub Actions：
 
 - 每次推送 `main` 都会自动构建并上传安装程序 Artifact
-- 推送形如 `v1.0.0` 的标签时，会自动创建 GitHub Release，并只附带 `SleepSentinel-Setup-win-x64.exe`
+- 推送形如 `v1.0.0` 的标签时，会自动创建 GitHub Release，并附带带版本号的安装包与便携版可执行文件
 
 当前 Release 采用 `framework-dependent` 小体积单文件发布，因此目标电脑需要安装 `.NET 8 Desktop Runtime`。
 

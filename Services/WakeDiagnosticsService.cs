@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Diagnostics.Eventing.Reader;
 using System.Globalization;
-using System.ServiceProcess;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
@@ -11,6 +10,7 @@ namespace SleepSentinel.Services;
 
 public sealed class WakeDiagnosticsService
 {
+    private const int SleepStudyTimeoutMilliseconds = 20000;
     private static readonly Regex TimestampRegex = new(
         @"(?<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -46,7 +46,11 @@ public sealed class WakeDiagnosticsService
         _logger = logger;
     }
 
-    public WakeDiagnosticSnapshot CollectSnapshot(DateTimeOffset? sinceUtc = null, bool includePowerRequests = true, bool includeSleepStudy = true)
+    public WakeDiagnosticSnapshot CollectSnapshot(
+        DateTimeOffset? sinceUtc = null,
+        bool includePowerRequests = true,
+        bool includeSleepStudy = true,
+        IEnumerable<string>? existingCustomRemoteEntries = null)
     {
         var snapshot = new WakeDiagnosticSnapshot
         {
@@ -60,9 +64,10 @@ public sealed class WakeDiagnosticsService
         {
             snapshot.PowerRequestsText = _powerCfg.Run("/requests");
             snapshot.RequestOverridesText = _powerCfg.Run("/requestsoverride");
-            var suggestions = RemoteWakeBlockCatalog.SuggestCustomEntries(snapshot.PowerRequestsText);
+            var suggestions = RemoteWakeBlockCatalog.SuggestCustomEntries(snapshot.PowerRequestsText, existingCustomRemoteEntries);
+            snapshot.SuggestedRemoteWakeEntries = suggestions;
             snapshot.SuggestedRemoteWakeEntriesSummary = suggestions.Count == 0
-                ? "未从当前 requests / 运行进程 / 服务中发现新的远控候选项"
+                ? "未从当前 requests / 运行进程 / 运行服务中发现新的远控候选项"
                 : $"建议加入自定义远控拦截：{string.Join("、", suggestions)}";
         }
 
@@ -87,18 +92,6 @@ public sealed class WakeDiagnosticsService
             return deepHibernateSummary;
         }
 
-        if (!string.IsNullOrWhiteSpace(snapshot.EventSummary))
-        {
-            var firstLine = snapshot.EventSummary
-                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-                .FirstOrDefault();
-
-            if (!string.IsNullOrWhiteSpace(firstLine))
-            {
-                return firstLine.Trim();
-            }
-        }
-
         if (ContainsAny(snapshot.LastWakeText, ManualIndicators))
         {
             return "powercfg 指向人工输入/开盖。";
@@ -109,6 +102,25 @@ public sealed class WakeDiagnosticsService
             return "powercfg 指向软件/定时器活动。";
         }
 
+        var remoteSuggestions = snapshot.SuggestedRemoteWakeEntries;
+        if (remoteSuggestions.Count > 0)
+        {
+            var summarizedSuggestions = string.Join("、", remoteSuggestions.Take(3));
+            return $"当前 requests / 运行进程 / 运行服务中存在疑似远控/保活项：{summarizedSuggestions}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(snapshot.EventSummary))
+        {
+            var latestLine = snapshot.EventSummary
+                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .LastOrDefault();
+
+            if (!string.IsNullOrWhiteSpace(latestLine))
+            {
+                return latestLine.Trim();
+            }
+        }
+
         return "暂未从 powercfg 和事件日志中提取到明确证据。";
     }
 
@@ -117,6 +129,7 @@ public sealed class WakeDiagnosticsService
         var lines = new List<string>();
         lines.AddRange(ReadSystemHighlights(sinceUtc));
         lines.AddRange(ReadWindowsUpdateHighlights(sinceUtc));
+        lines.AddRange(ReadReliabilityHighlights(sinceUtc));
 
         if (lines.Count == 0)
         {
@@ -134,12 +147,15 @@ public sealed class WakeDiagnosticsService
         var allowedProviders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "Microsoft-Windows-Kernel-Power",
+            "Microsoft-Windows-Power-Troubleshooter",
+            "Microsoft-Windows-NDIS",
+            "Windows Error Reporting",
             "Service Control Manager",
             "Microsoft-Windows-Kernel-Boot"
         };
 
-        var allowedIds = new HashSet<int> { 41, 42, 107, 506, 507, 7040, 7045, 20 };
-        return ReadEventLines("System", sinceUtc, allowedProviders, allowedIds, 16);
+        var allowedIds = new HashSet<int> { 1, 41, 42, 107, 506, 507, 1001, 7040, 7045, 10317 };
+        return ReadEventLines("System", sinceUtc, allowedProviders, allowedIds, 20);
     }
 
     private IEnumerable<string> ReadWindowsUpdateHighlights(DateTimeOffset sinceUtc)
@@ -151,6 +167,17 @@ public sealed class WakeDiagnosticsService
 
         var allowedIds = new HashSet<int> { 19, 20, 21, 43, 44 };
         return ReadEventLines("Microsoft-Windows-WindowsUpdateClient/Operational", sinceUtc, allowedProviders, allowedIds, 10);
+    }
+
+    private IEnumerable<string> ReadReliabilityHighlights(DateTimeOffset sinceUtc)
+    {
+        var allowedProviders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Microsoft-Windows-WHEA-Logger"
+        };
+
+        var allowedIds = new HashSet<int> { 17, 18 };
+        return ReadEventLines("System", sinceUtc, allowedProviders, allowedIds, 6);
     }
 
     private IEnumerable<string> ReadEventLines(string logName, DateTimeOffset sinceUtc, ISet<string> providers, ISet<int> ids, int limit)
@@ -169,30 +196,37 @@ public sealed class WakeDiagnosticsService
             {
                 using (record)
                 {
-                    if (record.TimeCreated is not { } createdAt)
+                    try
                     {
-                        continue;
-                    }
+                        if (record.TimeCreated is not { } createdAt)
+                        {
+                            continue;
+                        }
 
-                    var timestamp = new DateTimeOffset(createdAt);
-                    if (timestamp < sinceUtc)
+                        var timestamp = new DateTimeOffset(createdAt);
+                        if (timestamp < sinceUtc)
+                        {
+                            break;
+                        }
+
+                        if (!providers.Contains(record.ProviderName ?? string.Empty) || !ids.Contains(record.Id))
+                        {
+                            continue;
+                        }
+
+                        var message = record.FormatDescription();
+                        if (string.IsNullOrWhiteSpace(message))
+                        {
+                            message = $"{record.ProviderName} 事件 {record.Id}";
+                        }
+
+                        message = CollapseWhitespace(message);
+                        lines.Add($"{timestamp.ToLocalTime():yyyy-MM-dd HH:mm:ss} [{record.ProviderName}#{record.Id}] {message}");
+                    }
+                    catch (EventLogException ex)
                     {
-                        break;
+                        _logger.Warn($"读取事件日志 {logName} 中的单条记录失败，已跳过：{ex.Message}");
                     }
-
-                    if (!providers.Contains(record.ProviderName ?? string.Empty) || !ids.Contains(record.Id))
-                    {
-                        continue;
-                    }
-
-                    var message = record.FormatDescription();
-                    if (string.IsNullOrWhiteSpace(message))
-                    {
-                        message = $"{record.ProviderName} 事件 {record.Id}";
-                    }
-
-                    message = CollapseWhitespace(message);
-                    lines.Add($"{timestamp.ToLocalTime():yyyy-MM-dd HH:mm:ss} [{record.ProviderName}#{record.Id}] {message}");
                 }
             }
         }
@@ -214,7 +248,7 @@ public sealed class WakeDiagnosticsService
     private string CollectSleepStudySummary()
     {
         var outputPath = Path.Combine(Path.GetTempPath(), $"sleepstudy-{DateTime.Now:yyyyMMdd-HHmmss}.xml");
-        var result = _powerCfg.Run($"/sleepstudy /duration 1 /xml /output \"{outputPath}\"");
+        var result = _powerCfg.Run($"/sleepstudy /duration 1 /xml /output \"{outputPath}\"", SleepStudyTimeoutMilliseconds);
         if (!File.Exists(outputPath))
         {
             return string.IsNullOrWhiteSpace(result) ? "未能生成 SleepStudy XML。" : result;

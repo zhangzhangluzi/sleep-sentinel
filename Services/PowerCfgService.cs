@@ -12,7 +12,7 @@ public sealed class PowerCfgService
         _logger = logger;
     }
 
-    public string Run(string arguments)
+    public string Run(string arguments, int timeoutMilliseconds = TimeoutMilliseconds)
     {
         try
         {
@@ -28,11 +28,11 @@ public sealed class PowerCfgService
             var outputTask = process.StandardOutput.ReadToEndAsync();
             var errorTask = process.StandardError.ReadToEndAsync();
 
-            if (!process.WaitForExit(TimeoutMilliseconds))
+            if (!process.WaitForExit(timeoutMilliseconds))
             {
                 TryKillProcess(process);
                 process.WaitForExit();
-                var timeoutMessage = $"powercfg {arguments} 超时（超过 {TimeoutMilliseconds / 1000} 秒）";
+                var timeoutMessage = $"powercfg {arguments} 超时（超过 {timeoutMilliseconds / 1000} 秒）";
                 _logger.Warn(timeoutMessage);
                 return timeoutMessage;
             }

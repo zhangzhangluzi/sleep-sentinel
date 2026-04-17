@@ -22,11 +22,12 @@ public sealed class DiagnosticReportService
 
         var timestamp = DateTime.Now;
         var reportPath = Path.Combine(reportsDirectory, $"diagnostic-report-{timestamp:yyyyMMdd-HHmmss}.txt");
-        var settings = _settingsStore.Load();
+        var settings = _controller.CurrentSettings;
         var recentLogs = _logger.ReadRecent(400);
         var snapshot = _controller.CollectWakeDiagnosticSnapshot(includePowerRequests: true, includeSleepStudy: true);
         var wakeDiagnostics = _controller.FormatWakeDiagnosticSnapshot(snapshot, includePowerRequests: false, includeSleepStudy: false);
-        var powerRequestDiagnostics = _controller.CollectPowerRequestDiagnostics();
+        var powerRequestDiagnostics =
+            $"requests:{Environment.NewLine}{snapshot.PowerRequestsText}{Environment.NewLine}{Environment.NewLine}requestsoverride:{Environment.NewLine}{snapshot.RequestOverridesText}";
 
         var builder = new StringBuilder();
         builder.AppendLine("SleepSentinel Diagnostic Report");
@@ -40,6 +41,7 @@ public sealed class DiagnosticReportService
         builder.AppendLine($"ResumeProtectionDelaySeconds: {settings.ResumeProtectionDelaySeconds}");
         builder.AppendLine($"DisableWakeTimers: {settings.DisableWakeTimers}");
         builder.AppendLine($"DisableStandbyConnectivity: {settings.DisableStandbyConnectivity}");
+        builder.AppendLine($"DisableWiFiDirectAdapters: {settings.DisableWiFiDirectAdapters}");
         builder.AppendLine($"EnforceBatteryStandbyHibernate: {settings.EnforceBatteryStandbyHibernate}");
         builder.AppendLine($"BatteryStandbyHibernateTimeoutSeconds: {settings.BatteryStandbyHibernateTimeoutSeconds}");
         builder.AppendLine($"BlockKnownRemoteWakeRequests: {settings.BlockKnownRemoteWakeRequests}");
@@ -58,6 +60,9 @@ public sealed class DiagnosticReportService
         builder.AppendLine($"DisconnectedStandbyModeRestoreAcValue: {settings.DisconnectedStandbyModeRestoreAcValue}");
         builder.AppendLine($"DisconnectedStandbyModeRestoreDcValue: {settings.DisconnectedStandbyModeRestoreDcValue}");
         builder.AppendLine($"StandbyConnectivityPolicySummary: {settings.StandbyConnectivityPolicySummary}");
+        builder.AppendLine($"WiFiDirectAdapterRestoreSnapshotCaptured: {settings.WiFiDirectAdapterRestoreSnapshotCaptured}");
+        builder.AppendLine($"WiFiDirectAdapterRestoreInstanceIds: {string.Join(", ", settings.WiFiDirectAdapterRestoreInstanceIds)}");
+        builder.AppendLine($"WiFiDirectAdapterPolicySummary: {settings.WiFiDirectAdapterPolicySummary}");
         builder.AppendLine($"BatteryStandbyHibernateRestoreSnapshotCaptured: {settings.BatteryStandbyHibernateRestoreSnapshotCaptured}");
         builder.AppendLine($"BatteryStandbyHibernateRestoreAcValue: {settings.BatteryStandbyHibernateRestoreAcValue}");
         builder.AppendLine($"BatteryStandbyHibernateRestoreDcValue: {settings.BatteryStandbyHibernateRestoreDcValue}");
@@ -65,6 +70,7 @@ public sealed class DiagnosticReportService
         builder.AppendLine($"KnownRemoteWakeRequestBackupCaptured: {settings.KnownRemoteWakeRequestBackupCaptured}");
         builder.AppendLine($"KnownRemoteWakeRequestOverrideBackupCount: {settings.KnownRemoteWakeRequestOverrideBackup.Count}");
         builder.AppendLine($"KnownRemoteWakePolicySummary: {settings.KnownRemoteWakePolicySummary}");
+        builder.AppendLine($"AutostartPolicySummary: {settings.AutostartPolicySummary}");
         builder.AppendLine($"ProtectionRuleSummary: {_controller.CurrentProtectionRuleSummary}");
         builder.AppendLine($"StartMinimized: {settings.StartMinimized}");
         builder.AppendLine($"StartWithWindows: {settings.StartWithWindows}");

@@ -13,7 +13,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon _appIcon;
     private readonly SettingsStore _settingsStore;
     private readonly EventWaitHandle _activationSignal;
+    private readonly EventWaitHandle _takeoverSignal;
     private readonly RegisteredWaitHandle _activationWaitHandle;
+    private readonly RegisteredWaitHandle _takeoverWaitHandle;
     private readonly TrayMessageWindow _trayMessageWindow;
     private readonly DiagnosticReportService _diagnosticReportService;
     private readonly ToolStripMenuItem _followPowerPlanMenuItem;
@@ -32,13 +34,15 @@ public sealed class TrayApplicationContext : ApplicationContext
         FileLogger logger,
         SettingsStore settingsStore,
         Icon appIcon,
-        EventWaitHandle activationSignal)
+        EventWaitHandle activationSignal,
+        EventWaitHandle takeoverSignal)
     {
         _controller = controller;
         _logger = logger;
         _appIcon = (Icon)appIcon.Clone();
         _settingsStore = settingsStore;
         _activationSignal = activationSignal;
+        _takeoverSignal = takeoverSignal;
         _diagnosticReportService = new DiagnosticReportService(settingsStore, logger, controller);
 
         _mainForm = new MainForm(controller, logger, settingsStore, _appIcon);
@@ -169,6 +173,12 @@ public sealed class TrayApplicationContext : ApplicationContext
             this,
             Timeout.Infinite,
             false);
+        _takeoverWaitHandle = ThreadPool.RegisterWaitForSingleObject(
+            _takeoverSignal,
+            static (state, _) => ((TrayApplicationContext)state!).OnTakeoverRequested(),
+            this,
+            Timeout.Infinite,
+            false);
         RefreshTrayText();
 
         if (!_controller.CurrentSettings.StartMinimized)
@@ -182,6 +192,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _isExiting = true;
         _controller.StateChanged -= _stateChangedHandler;
         _activationWaitHandle.Unregister(null);
+        _takeoverWaitHandle.Unregister(null);
         _trayMessageWindow.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
@@ -238,7 +249,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void ToggleSetting(Action<AppSettings> mutation)
     {
-        var updatedSettings = _settingsStore.Load();
+        var updatedSettings = _controller.CurrentSettings;
         mutation(updatedSettings);
         _controller.UpdateSettings(updatedSettings);
     }
@@ -261,6 +272,31 @@ public sealed class TrayApplicationContext : ApplicationContext
 
                 _logger.Info("收到新的启动请求，已唤回现有实例。");
                 ShowMainForm();
+            }));
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private void OnTakeoverRequested()
+    {
+        if (_isExiting || _mainForm.IsDisposed || !_mainForm.IsHandleCreated)
+        {
+            return;
+        }
+
+        try
+        {
+            _mainForm.BeginInvoke(new Action(() =>
+            {
+                if (_isExiting || _mainForm.IsDisposed)
+                {
+                    return;
+                }
+
+                _logger.Warn("收到更高权限实例的接管请求，正在退出当前实例。");
+                ExitThread();
             }));
         }
         catch (InvalidOperationException)

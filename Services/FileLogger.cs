@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace SleepSentinel.Services;
 
 public sealed class FileLogger
@@ -74,16 +76,35 @@ public sealed class FileLogger
 
     private void Write(string level, string message)
     {
-        var line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {message}";
-        var path = GetLogPath(DateTime.Now);
+        var timestamp = DateTime.Now;
+        var line = $"[{timestamp:yyyy-MM-dd HH:mm:ss}] [{level}] {message}";
+        var path = GetLogPath(timestamp);
 
-        lock (_sync)
+        try
         {
-            Directory.CreateDirectory(_logDirectory);
-            File.AppendAllText(path, line + Environment.NewLine);
+            lock (_sync)
+            {
+                Directory.CreateDirectory(_logDirectory);
+                File.AppendAllText(path, line + Environment.NewLine);
+            }
+        }
+        catch (IOException ex)
+        {
+            Debug.WriteLine($"SleepSentinel log write failed: {ex.Message}");
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Debug.WriteLine($"SleepSentinel log write denied: {ex.Message}");
         }
 
-        LogWritten?.Invoke(this, line);
+        try
+        {
+            LogWritten?.Invoke(this, line);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"SleepSentinel log subscriber failed: {ex.Message}");
+        }
     }
 
     private string GetLogPath(DateTime timestamp)

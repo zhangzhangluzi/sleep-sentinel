@@ -10,45 +10,22 @@ public sealed class SettingsStore
         WriteIndented = true
     };
     private readonly object _sync = new();
+    private AppSettings? _cachedSettings;
 
     public string BaseDirectory { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "SleepSentinel");
 
     public string SettingsPath => Path.Combine(BaseDirectory, "settings.json");
+    public string LastKnownGoodSettingsPath => Path.Combine(BaseDirectory, "settings.last-good.json");
 
     public AppSettings Load()
     {
         lock (_sync)
         {
-            Directory.CreateDirectory(BaseDirectory);
-
-            if (!File.Exists(SettingsPath))
-            {
-                return CreateDefaultSettingsUnsafe();
-            }
-
-            try
-            {
-                var json = File.ReadAllText(SettingsPath);
-                return JsonSerializer.Deserialize<AppSettings>(json, SerializerOptions) ?? BackupAndResetSettingsUnsafe();
-            }
-            catch (JsonException)
-            {
-                return BackupAndResetSettingsUnsafe();
-            }
-            catch (NotSupportedException)
-            {
-                return BackupAndResetSettingsUnsafe();
-            }
-            catch (IOException)
-            {
-                return new AppSettings();
-            }
-            catch (UnauthorizedAccessException)
-            {
-                return new AppSettings();
-            }
+            var settings = LoadUnsafe();
+            _cachedSettings = settings.Clone();
+            return settings.Clone();
         }
     }
 
@@ -57,6 +34,74 @@ public sealed class SettingsStore
         lock (_sync)
         {
             SaveUnsafe(settings);
+        }
+    }
+
+    public AppSettings Update(Action<AppSettings> mutation)
+    {
+        lock (_sync)
+        {
+            var settings = _cachedSettings?.Clone() ?? LoadUnsafe();
+            mutation(settings);
+            SaveUnsafe(settings);
+            return settings.Clone();
+        }
+    }
+
+    private AppSettings LoadUnsafe()
+    {
+        Directory.CreateDirectory(BaseDirectory);
+
+        if (!File.Exists(SettingsPath))
+        {
+            if (TryLoadLastKnownGoodUnsafe(out var recovered))
+            {
+                SaveUnsafe(recovered);
+                return recovered;
+            }
+
+            return CreateDefaultSettingsUnsafe();
+        }
+
+        try
+        {
+            return ReadSettingsFileUnsafe(SettingsPath) ?? BackupAndResetSettingsUnsafe();
+        }
+        catch (JsonException)
+        {
+            return BackupAndResetSettingsUnsafe();
+        }
+        catch (NotSupportedException)
+        {
+            return BackupAndResetSettingsUnsafe();
+        }
+        catch (IOException)
+        {
+            if (_cachedSettings is not null)
+            {
+                return _cachedSettings.Clone();
+            }
+
+            if (TryLoadLastKnownGoodUnsafe(out var recovered))
+            {
+                return recovered;
+            }
+
+            return new AppSettings();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            if (_cachedSettings is not null)
+            {
+                return _cachedSettings.Clone();
+            }
+
+            if (TryLoadLastKnownGoodUnsafe(out var recovered))
+            {
+                return recovered;
+            }
+
+            return new AppSettings();
         }
     }
 
@@ -81,6 +126,14 @@ public sealed class SettingsStore
         var json = JsonSerializer.Serialize(settings, SerializerOptions);
         File.WriteAllText(tempPath, json);
         File.Move(tempPath, SettingsPath, true);
+        TryWriteLastKnownGoodUnsafe(json);
+        _cachedSettings = settings.Clone();
+    }
+
+    private AppSettings? ReadSettingsFileUnsafe(string path)
+    {
+        var json = File.ReadAllText(path);
+        return JsonSerializer.Deserialize<AppSettings>(json, SerializerOptions);
     }
 
     private void TryBackupCorruptedSettingsUnsafe()
@@ -94,6 +147,51 @@ public sealed class SettingsStore
         {
             var backupPath = Path.Combine(BaseDirectory, $"settings.corrupt-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.json");
             File.Copy(SettingsPath, backupPath);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private bool TryLoadLastKnownGoodUnsafe(out AppSettings settings)
+    {
+        settings = new AppSettings();
+        if (!File.Exists(LastKnownGoodSettingsPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            settings = ReadSettingsFileUnsafe(LastKnownGoodSettingsPath) ?? new AppSettings();
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private void TryWriteLastKnownGoodUnsafe(string json)
+    {
+        try
+        {
+            File.WriteAllText(LastKnownGoodSettingsPath, json);
         }
         catch (IOException)
         {

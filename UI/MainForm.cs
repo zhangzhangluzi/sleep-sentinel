@@ -15,11 +15,14 @@ public sealed class MainForm : Form
     private readonly DiagnosticReportService _diagnosticReportService;
     private readonly ComboBox _policyModeComboBox;
     private readonly CheckBox _resumeProtectionCheckbox;
-    private readonly ComboBox _resumeActionComboBox;
+    private readonly RadioButton _resumeSleepRadioButton;
+    private readonly RadioButton _resumeHibernateRadioButton;
+    private readonly RadioButton _resumeLockScreenRadioButton;
     private readonly NumericUpDown _resumeDelayInput;
     private readonly CheckBox _onlyUnattendedWakeCheckbox;
     private readonly CheckBox _disableWakeTimersCheckbox;
     private readonly CheckBox _disableStandbyConnectivityCheckbox;
+    private readonly CheckBox _disableWiFiDirectAdaptersCheckbox;
     private readonly CheckBox _enforceBatteryStandbyHibernateCheckbox;
     private readonly NumericUpDown _batteryStandbyHibernateTimeoutInput;
     private readonly CheckBox _blockKnownRemoteWakeCheckbox;
@@ -29,6 +32,7 @@ public sealed class MainForm : Form
     private readonly Label _statusLabel;
     private readonly Label _wakeTimerQuickStateLabel;
     private readonly Label _standbyConnectivityQuickStateLabel;
+    private readonly Label _wifiDirectQuickStateLabel;
     private readonly Label _batteryStandbyHibernateQuickStateLabel;
     private readonly Label _remoteWakeQuickStateLabel;
     private readonly Label _customRemoteWakeHintLabel;
@@ -51,7 +55,7 @@ public sealed class MainForm : Form
         MinimumSize = new Size(MinimumWindowWidth, MinimumWindowHeight);
         StartPosition = FormStartPosition.Manual;
         Icon = _appIcon;
-        ApplyInitialWindowBounds(_settingsStore.Load());
+        ApplyInitialWindowBounds(_controller.CurrentSettings);
 
         var root = new TableLayoutPanel
         {
@@ -95,13 +99,13 @@ public sealed class MainForm : Form
         _resumeProtectionCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "恢复后自动重新进入睡眠/休眠，避免被软件唤醒后常驻亮机"
+            Text = "恢复后自动执行睡眠/休眠/锁屏，避免被软件唤醒后常驻亮机"
         };
         _resumeProtectionCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
-        _resumeActionComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 180 };
-        _resumeActionComboBox.Items.AddRange(["睡眠", "休眠"]);
-        _resumeActionComboBox.SelectedIndexChanged += (_, _) => ApplyUiSettingsImmediately();
+        _resumeSleepRadioButton = CreateResumeActionRadioButton("睡眠");
+        _resumeHibernateRadioButton = CreateResumeActionRadioButton("休眠");
+        _resumeLockScreenRadioButton = CreateResumeActionRadioButton("锁屏");
 
         _resumeDelayInput = new NumericUpDown
         {
@@ -161,6 +165,30 @@ public sealed class MainForm : Form
             else
             {
                 _controller.RestoreStandbyConnectivityWake();
+            }
+
+            SyncUiFromController();
+        };
+
+        _disableWiFiDirectAdaptersCheckbox = new CheckBox
+        {
+            AutoSize = true,
+            Text = "禁用 Microsoft Wi-Fi Direct 虚拟适配器（降低 S0 待机恢复异常；影响无线投屏/移动热点/附近共享）"
+        };
+        _disableWiFiDirectAdaptersCheckbox.CheckedChanged += (_, _) =>
+        {
+            if (_suppressInteractiveToggleEvents)
+            {
+                return;
+            }
+
+            if (_disableWiFiDirectAdaptersCheckbox.Checked)
+            {
+                _controller.DisableWiFiDirectAdapters();
+            }
+            else
+            {
+                _controller.RestoreWiFiDirectAdapters();
             }
 
             SyncUiFromController();
@@ -244,8 +272,12 @@ public sealed class MainForm : Form
         AddSettingRow(settingsPanel, 1, "恢复保护", _resumeProtectionCheckbox);
 
         var resumeOptionsFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
+        var resumeActionFlow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        resumeActionFlow.Controls.Add(_resumeSleepRadioButton);
+        resumeActionFlow.Controls.Add(_resumeHibernateRadioButton);
+        resumeActionFlow.Controls.Add(_resumeLockScreenRadioButton);
         resumeOptionsFlow.Controls.Add(new Label { Text = "恢复后执行", AutoSize = true, Padding = new Padding(0, 7, 8, 0) });
-        resumeOptionsFlow.Controls.Add(_resumeActionComboBox);
+        resumeOptionsFlow.Controls.Add(resumeActionFlow);
         resumeOptionsFlow.Controls.Add(new Label { Text = "延迟秒数", AutoSize = true, Padding = new Padding(16, 7, 8, 0) });
         resumeOptionsFlow.Controls.Add(_resumeDelayInput);
         AddSettingRow(settingsPanel, 2, "保护细节", resumeOptionsFlow);
@@ -277,6 +309,19 @@ public sealed class MainForm : Form
         standbyConnectivityActions.Controls.Add(_standbyConnectivityQuickStateLabel);
         AddSettingRow(settingsPanel, 5, "待机联网", standbyConnectivityActions);
 
+        var wifiDirectActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
+        var reapplyWiFiDirectButton = new Button { Text = "重新应用", AutoSize = true };
+        reapplyWiFiDirectButton.Click += (_, _) =>
+        {
+            _controller.ReapplyWiFiDirectAdapterPolicy();
+            SyncUiFromController();
+        };
+        _wifiDirectQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
+        wifiDirectActions.Controls.Add(_disableWiFiDirectAdaptersCheckbox);
+        wifiDirectActions.Controls.Add(reapplyWiFiDirectButton);
+        wifiDirectActions.Controls.Add(_wifiDirectQuickStateLabel);
+        AddSettingRow(settingsPanel, 6, "无线稳态", wifiDirectActions);
+
         var batteryStandbyHibernateActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
         var reapplyBatteryStandbyHibernateButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyBatteryStandbyHibernateButton.Click += (_, _) =>
@@ -291,7 +336,7 @@ public sealed class MainForm : Form
         batteryStandbyHibernateActions.Controls.Add(_batteryStandbyHibernateTimeoutInput);
         batteryStandbyHibernateActions.Controls.Add(reapplyBatteryStandbyHibernateButton);
         batteryStandbyHibernateActions.Controls.Add(_batteryStandbyHibernateQuickStateLabel);
-        AddSettingRow(settingsPanel, 6, "电池兜底", batteryStandbyHibernateActions);
+        AddSettingRow(settingsPanel, 7, "电池兜底", batteryStandbyHibernateActions);
 
         var remoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
         var reapplyRemoteWakeButton = new Button { Text = "重新应用", AutoSize = true };
@@ -308,7 +353,7 @@ public sealed class MainForm : Form
         remoteWakeActions.Controls.Add(reapplyRemoteWakeButton);
         remoteWakeActions.Controls.Add(suggestRemoteWakeButton);
         remoteWakeActions.Controls.Add(_remoteWakeQuickStateLabel);
-        AddSettingRow(settingsPanel, 7, "远控拦截", remoteWakeActions);
+        AddSettingRow(settingsPanel, 8, "远控拦截", remoteWakeActions);
 
         var customRemoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, FlowDirection = FlowDirection.TopDown };
         var customRemoteWakeToolbar = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
@@ -319,12 +364,12 @@ public sealed class MainForm : Form
         customRemoteWakeToolbar.Controls.Add(_customRemoteWakeHintLabel);
         customRemoteWakeActions.Controls.Add(_customRemoteWakeTextBox);
         customRemoteWakeActions.Controls.Add(customRemoteWakeToolbar);
-        AddSettingRow(settingsPanel, 8, "自定义远控", customRemoteWakeActions);
+        AddSettingRow(settingsPanel, 9, "自定义远控", customRemoteWakeActions);
 
         var startupFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
         startupFlow.Controls.Add(_startMinimizedCheckbox);
         startupFlow.Controls.Add(_autostartCheckbox);
-        AddSettingRow(settingsPanel, 9, "启动行为", startupFlow);
+        AddSettingRow(settingsPanel, 10, "启动行为", startupFlow);
 
         root.Controls.Add(settingsPanel);
 
@@ -386,7 +431,7 @@ public sealed class MainForm : Form
 
         Controls.Add(root);
 
-        _stateChangedHandler = (_, _) => RefreshStatusAndDetails();
+        _stateChangedHandler = (_, _) => SyncUiFromController(includeDiagnostics: false);
 
         _logger.LogWritten += OnLogWritten;
         _controller.StateChanged += _stateChangedHandler;
@@ -467,7 +512,7 @@ public sealed class MainForm : Form
         var suggestions = _controller.SuggestCustomRemoteWakeEntries();
         if (suggestions.Count == 0)
         {
-            MessageBox.Show("当前 requests / 运行进程 / 服务里没有发现新的远控候选项。", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show("当前 requests / 运行进程 / 运行服务里没有发现新的远控候选项。", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -484,18 +529,17 @@ public sealed class MainForm : Form
 
     private AppSettings CreateSettingsFromUi()
     {
-        var settings = _settingsStore.Load();
+        var settings = _controller.CurrentSettings;
         settings.PolicyMode = _policyModeComboBox.SelectedIndex == 1
             ? PowerPolicyMode.KeepAwakeIndefinitely
             : PowerPolicyMode.FollowPowerPlan;
         settings.ResumeProtectionEnabled = _resumeProtectionCheckbox.Checked;
-        settings.ResumeProtectionMode = _resumeActionComboBox.SelectedIndex == 1
-            ? ResumeProtectionMode.Hibernate
-            : ResumeProtectionMode.Sleep;
+        settings.ResumeProtectionMode = GetResumeProtectionModeFromUi();
         settings.ResumeProtectionOnlyForUnattendedWake = _onlyUnattendedWakeCheckbox.Checked;
         settings.ResumeProtectionDelaySeconds = (int)_resumeDelayInput.Value;
         settings.DisableWakeTimers = _disableWakeTimersCheckbox.Checked;
         settings.DisableStandbyConnectivity = _disableStandbyConnectivityCheckbox.Checked;
+        settings.DisableWiFiDirectAdapters = _disableWiFiDirectAdaptersCheckbox.Checked;
         settings.EnforceBatteryStandbyHibernate = _enforceBatteryStandbyHibernateCheckbox.Checked;
         settings.BatteryStandbyHibernateTimeoutSeconds = checked((int)_batteryStandbyHibernateTimeoutInput.Value * 60);
         settings.BlockKnownRemoteWakeRequests = _blockKnownRemoteWakeCheckbox.Checked;
@@ -512,11 +556,12 @@ public sealed class MainForm : Form
         {
             _policyModeComboBox.SelectedIndex = settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely ? 1 : 0;
             _resumeProtectionCheckbox.Checked = settings.ResumeProtectionEnabled;
-            _resumeActionComboBox.SelectedIndex = settings.ResumeProtectionMode == ResumeProtectionMode.Hibernate ? 1 : 0;
+            SetResumeProtectionModeOnUi(settings.ResumeProtectionMode);
             _onlyUnattendedWakeCheckbox.Checked = settings.ResumeProtectionOnlyForUnattendedWake;
             _resumeDelayInput.Value = Math.Clamp(settings.ResumeProtectionDelaySeconds, 3, 600);
             _disableWakeTimersCheckbox.Checked = settings.DisableWakeTimers;
             _disableStandbyConnectivityCheckbox.Checked = settings.DisableStandbyConnectivity;
+            _disableWiFiDirectAdaptersCheckbox.Checked = settings.DisableWiFiDirectAdapters;
             _batteryStandbyHibernateTimeoutInput.Value = Math.Clamp(settings.BatteryStandbyHibernateTimeoutSeconds / 60, 3, 240);
             _enforceBatteryStandbyHibernateCheckbox.Checked = settings.EnforceBatteryStandbyHibernate;
             _blockKnownRemoteWakeCheckbox.Checked = settings.BlockKnownRemoteWakeRequests;
@@ -530,13 +575,54 @@ public sealed class MainForm : Form
         }
 
         UpdateBatteryStandbyHibernateCheckboxText();
-        _wakeTimerQuickStateLabel.Text = settings.DisableWakeTimers ? "当前：已拦截" : "当前：未接管";
-        _standbyConnectivityQuickStateLabel.Text = settings.DisableStandbyConnectivity ? "当前：已拦截" : "当前：未接管";
-        _batteryStandbyHibernateQuickStateLabel.Text = settings.EnforceBatteryStandbyHibernate ? "当前：已兜底" : "当前：未接管";
-        _remoteWakeQuickStateLabel.Text = settings.BlockKnownRemoteWakeRequests ? "当前：已拦截" : "当前：未接管";
+        _wakeTimerQuickStateLabel.Text = _controller.CurrentWakeTimerQuickState;
+        _standbyConnectivityQuickStateLabel.Text = _controller.CurrentStandbyConnectivityQuickState;
+        _wifiDirectQuickStateLabel.Text = _controller.CurrentWiFiDirectQuickState;
+        _batteryStandbyHibernateQuickStateLabel.Text = _controller.CurrentBatteryStandbyHibernateQuickState;
+        _remoteWakeQuickStateLabel.Text = _controller.CurrentRemoteWakeQuickState;
         _customRemoteWakeHintLabel.Text = settings.CustomRemoteWakeEntries.Count == 0
             ? "当前：未添加自定义条目"
             : $"当前：{settings.CustomRemoteWakeEntries.Count} 条自定义规则";
+    }
+
+    private RadioButton CreateResumeActionRadioButton(string text)
+    {
+        var radioButton = new RadioButton
+        {
+            AutoSize = true,
+            Text = text,
+            Margin = new Padding(0, 6, 16, 0)
+        };
+        radioButton.CheckedChanged += (_, _) =>
+        {
+            if (_suppressInteractiveToggleEvents || !radioButton.Checked)
+            {
+                return;
+            }
+
+            ApplyUiSettingsImmediately();
+        };
+
+        return radioButton;
+    }
+
+    private ResumeProtectionMode GetResumeProtectionModeFromUi()
+    {
+        if (_resumeLockScreenRadioButton.Checked)
+        {
+            return ResumeProtectionMode.LockScreen;
+        }
+
+        return _resumeHibernateRadioButton.Checked
+            ? ResumeProtectionMode.Hibernate
+            : ResumeProtectionMode.Sleep;
+    }
+
+    private void SetResumeProtectionModeOnUi(ResumeProtectionMode mode)
+    {
+        _resumeSleepRadioButton.Checked = mode == ResumeProtectionMode.Sleep;
+        _resumeHibernateRadioButton.Checked = mode == ResumeProtectionMode.Hibernate;
+        _resumeLockScreenRadioButton.Checked = mode == ResumeProtectionMode.LockScreen;
     }
 
     private void RefreshStatusAndDetails()
@@ -566,8 +652,10 @@ public sealed class MainForm : Form
             $"远控名单：{_controller.CurrentManagedRemoteEntriesSummary}{Environment.NewLine}" +
             $"唤醒定时器策略：{settings.WakeTimerPolicySummary}{Environment.NewLine}" +
             $"待机联网策略：{settings.StandbyConnectivityPolicySummary}{Environment.NewLine}" +
+            $"Wi-Fi Direct 策略：{settings.WiFiDirectAdapterPolicySummary}{Environment.NewLine}" +
             $"电池兜底策略：{settings.BatteryStandbyHibernatePolicySummary}{Environment.NewLine}" +
             $"远控拦截策略：{settings.KnownRemoteWakePolicySummary}{Environment.NewLine}" +
+            $"启动策略：{settings.AutostartPolicySummary}{Environment.NewLine}" +
             $"配置文件：{_settingsStore.SettingsPath}{Environment.NewLine}" +
             $"日志目录：{_logger.LogDirectory}{Environment.NewLine}" +
             $"上次挂起：{FormatTime(settings.LastSuspendUtc)} | 上次恢复：{FormatTime(settings.LastResumeUtc)}";
@@ -638,6 +726,17 @@ public sealed class MainForm : Form
 
     private void SyncUiFromController(bool includeDiagnostics = false)
     {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(() => SyncUiFromController(includeDiagnostics)));
+            return;
+        }
+
         ApplySettingsToUi(_controller.CurrentSettings);
         RefreshStatusAndDetails();
         LoadLogs();
@@ -687,13 +786,14 @@ public sealed class MainForm : Form
             return;
         }
 
-        var settings = _settingsStore.Load();
-        settings.WindowBoundsCaptured = true;
-        settings.WindowWidth = bounds.Width;
-        settings.WindowHeight = bounds.Height;
-        settings.WindowX = bounds.X;
-        settings.WindowY = bounds.Y;
-        _settingsStore.Save(settings);
+        _settingsStore.Update(settings =>
+        {
+            settings.WindowBoundsCaptured = true;
+            settings.WindowWidth = bounds.Width;
+            settings.WindowHeight = bounds.Height;
+            settings.WindowX = bounds.X;
+            settings.WindowY = bounds.Y;
+        });
     }
 
     private static IReadOnlyList<string> ParseCustomRemoteWakeEntries(string text)

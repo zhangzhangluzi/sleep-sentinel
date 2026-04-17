@@ -1,4 +1,7 @@
+using Microsoft.Win32;
 using System.Diagnostics;
+using System.Security;
+using System.ServiceProcess;
 using System.Text.RegularExpressions;
 
 namespace SleepSentinel.Services;
@@ -26,15 +29,15 @@ internal static class RemoteWakeBlockCatalog
         "awesun",
         "gameviewer",
         "parsec",
-        "remote",
+        "raylink",
         "rustdesk",
         "splashtop",
         "sunlogin",
         "teamviewer",
         "todesk",
         "ultraviewer",
-        "uu",
-        "vnc"
+        "vnc",
+        "oray"
     ];
 
     public static IReadOnlyList<PowerRequestOverrideEntry> BuiltInEntries { get; } =
@@ -121,28 +124,75 @@ internal static class RemoteWakeBlockCatalog
             }
         }
 
-        foreach (var process in Process.GetProcesses())
+        foreach (var process in EnumerateProcessesSafely())
         {
-            try
+            using (process)
             {
-                var processName = process.ProcessName;
-                if (string.IsNullOrWhiteSpace(processName))
+                try
                 {
-                    continue;
+                    var processName = process.ProcessName;
+                    if (string.IsNullOrWhiteSpace(processName))
+                    {
+                        continue;
+                    }
+
+                    var normalizedName = processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                        ? processName
+                        : $"{processName}.exe";
+
+                    if (TryCreateSuggestion(PowerRequestOverrideCallerType.Process, normalizedName, out var suggestion)
+                        && existingManagedKeys.Add(BuildDedupKey(suggestion.CallerType, suggestion.Name)))
+                    {
+                        suggestions.Add(FormatCustomEntry(suggestion));
+                    }
                 }
-
-                var normalizedName = processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                    ? processName
-                    : $"{processName}.exe";
-
-                if (TryCreateSuggestion(PowerRequestOverrideCallerType.Process, normalizedName, out var suggestion)
-                    && existingManagedKeys.Add(BuildDedupKey(suggestion.CallerType, suggestion.Name)))
+                catch (InvalidOperationException)
                 {
-                    suggestions.Add(FormatCustomEntry(suggestion));
+                }
+                catch
+                {
+                    // Some system processes deny metadata access. Ignore them and keep scanning.
                 }
             }
-            catch (InvalidOperationException)
+        }
+
+        foreach (var service in EnumerateServicesSafely())
+        {
+            using (service)
             {
+                try
+                {
+                    if (service.Status != ServiceControllerStatus.Running)
+                    {
+                        continue;
+                    }
+
+                    var serviceName = service.ServiceName?.Trim();
+                    if (string.IsNullOrWhiteSpace(serviceName))
+                    {
+                        continue;
+                    }
+
+                    if (!ContainsDiscoveryKeyword(serviceName)
+                        && !ContainsDiscoveryKeyword(service.DisplayName ?? string.Empty)
+                        && !ServiceImagePathContainsDiscoveryKeyword(serviceName))
+                    {
+                        continue;
+                    }
+
+                    var suggestion = new PowerRequestOverrideEntry(PowerRequestOverrideCallerType.Service, serviceName, "自定义");
+                    if (existingManagedKeys.Add(BuildDedupKey(suggestion.CallerType, suggestion.Name)))
+                    {
+                        suggestions.Add(FormatCustomEntry(suggestion));
+                    }
+                }
+                catch (InvalidOperationException)
+                {
+                }
+                catch
+                {
+                    // Service metadata can be unavailable during state changes or due to access restrictions.
+                }
             }
         }
 
@@ -279,6 +329,58 @@ internal static class RemoteWakeBlockCatalog
     private static string FormatCustomEntry(PowerRequestOverrideEntry entry)
     {
         return $"{entry.CallerTypeArgument}:{entry.Name}";
+    }
+
+    private static IEnumerable<Process> EnumerateProcessesSafely()
+    {
+        try
+        {
+            return Process.GetProcesses();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static IEnumerable<ServiceController> EnumerateServicesSafely()
+    {
+        try
+        {
+            return ServiceController.GetServices();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static bool ServiceImagePathContainsDiscoveryKeyword(string serviceName)
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{serviceName}", writable: false);
+            var rawImagePath = key?.GetValue("ImagePath") as string;
+            if (string.IsNullOrWhiteSpace(rawImagePath))
+            {
+                return false;
+            }
+
+            var expandedPath = Environment.ExpandEnvironmentVariables(rawImagePath.Trim());
+            return ContainsDiscoveryKeyword(expandedPath);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        catch (SecurityException)
+        {
+            return false;
+        }
     }
 
     private static string BuildDedupKey(PowerRequestOverrideCallerType callerType, string name)
