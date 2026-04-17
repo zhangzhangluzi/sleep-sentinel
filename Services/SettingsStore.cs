@@ -59,7 +59,7 @@ public sealed class SettingsStore
         {
             if (TryLoadLastKnownGoodUnsafe(out var recovered))
             {
-                SaveUnsafe(recovered);
+                TrySaveUnsafe(recovered);
                 return recovered;
             }
 
@@ -111,7 +111,7 @@ public sealed class SettingsStore
     private AppSettings CreateDefaultSettingsUnsafe()
     {
         var defaults = new AppSettings();
-        SaveUnsafe(defaults);
+        TrySaveUnsafe(defaults);
         return defaults;
     }
 

@@ -134,10 +134,12 @@ public sealed class PowerController : IDisposable
     private readonly object _resumeProtectionSync = new();
     private readonly object _resumeEvaluationSync = new();
     private readonly object _statusSnapshotSync = new();
+    private readonly object _activePowerPlanSync = new();
     private readonly PowerNotificationWindow? _powerNotificationWindow;
     private readonly System.Threading.Timer _resumeTimer;
     private DateTimeOffset? _lastManualResumeSignalUtc;
     private string _lastManualResumeSignalReason = "人工操作";
+    private string _activePowerPlanKey = string.Empty;
     private uint? _resumeProtectionArmedAtTick;
     private int _resumeEvaluationGeneration;
     private bool _disposed;
@@ -166,6 +168,7 @@ public sealed class PowerController : IDisposable
             this,
             Timeout.Infinite,
             Timeout.Infinite);
+        RememberActivePowerPlan();
 
         try
         {
@@ -179,6 +182,7 @@ public sealed class PowerController : IDisposable
 
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
         SystemEvents.SessionSwitch += OnSessionSwitch;
+        SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         ApplyPolicy(_settings.PolicyMode);
         if (_settings.DisableWakeTimers)
         {
@@ -797,6 +801,7 @@ public sealed class PowerController : IDisposable
         _disposed = true;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
+        SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
         if (_powerNotificationWindow is not null)
         {
             _powerNotificationWindow.LidStateChanged -= OnLidStateChanged;
@@ -1608,9 +1613,22 @@ public sealed class PowerController : IDisposable
                 break;
 
             case PowerModes.StatusChange:
-                StateChanged?.Invoke(this, EventArgs.Empty);
+                if (!ReapplyManagedPoliciesForActivePowerPlanIfChanged("电源状态变化"))
+                {
+                    StateChanged?.Invoke(this, EventArgs.Empty);
+                }
                 break;
         }
+    }
+
+    private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category is not (UserPreferenceCategory.Power or UserPreferenceCategory.Policy))
+        {
+            return;
+        }
+
+        _ = ReapplyManagedPoliciesForActivePowerPlanIfChanged($"系统偏好变化（{e.Category}）");
     }
 
     private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -1753,10 +1771,11 @@ public sealed class PowerController : IDisposable
 
     private string BuildCurrentStatus()
     {
+        var delaySeconds = Math.Max(3, _settings.ResumeProtectionDelaySeconds);
         return _settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely
             ? "无限期保持激活"
             : (_settings.ResumeProtectionEnabled
-                ? $"遵循电源计划，恢复后 {_settings.ResumeProtectionDelaySeconds} 秒自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}"
+                ? $"遵循电源计划，恢复后 {delaySeconds} 秒自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}"
                 : "遵循电源计划");
     }
 
@@ -2259,6 +2278,69 @@ public sealed class PowerController : IDisposable
             planName = nameMatch.Groups["name"].Value.Trim();
         }
 
+        return true;
+    }
+
+    private void RememberActivePowerPlan()
+    {
+        var planKey = GetActivePowerPlanKey(out _);
+        lock (_activePowerPlanSync)
+        {
+            _activePowerPlanKey = planKey;
+        }
+    }
+
+    private bool ReapplyManagedPoliciesForActivePowerPlanIfChanged(string reason)
+    {
+        if (!TryGetActivePowerPlanInfo(out var planId, out var planName))
+        {
+            return false;
+        }
+
+        lock (_activePowerPlanSync)
+        {
+            if (string.Equals(_activePowerPlanKey, planId, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            _activePowerPlanKey = planId;
+        }
+
+        InvalidateStatusSnapshot();
+        _logger.Info($"检测到当前电源计划已切换为 {planName} ({planId})，正在重新应用当前计划相关策略。来源：{reason}。");
+
+        if (_settings.DisableWakeTimers)
+        {
+            CaptureWakeTimerRestoreSnapshotIfNeeded();
+            ApplyWakeTimerPolicy();
+        }
+        else
+        {
+            RefreshWakeTimerPolicySummary();
+        }
+
+        if (_settings.DisableStandbyConnectivity)
+        {
+            CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
+            ApplyStandbyConnectivityPolicy();
+        }
+        else
+        {
+            RefreshStandbyConnectivityPolicySummary();
+        }
+
+        if (_settings.EnforceBatteryStandbyHibernate)
+        {
+            CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
+            ApplyBatteryStandbyHibernatePolicy();
+        }
+        else
+        {
+            RefreshBatteryStandbyHibernatePolicySummary();
+        }
+
+        StateChanged?.Invoke(this, EventArgs.Empty);
         return true;
     }
 
