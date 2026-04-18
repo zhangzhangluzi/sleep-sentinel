@@ -11,7 +11,7 @@ namespace SleepSentinel.Services;
 public sealed class PowerController : IDisposable
 {
     private static readonly TimeSpan ManualResumeSignalWindow = TimeSpan.FromSeconds(20);
-    private static readonly TimeSpan StatusSnapshotMaxAge = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan StatusSnapshotMaxAge = TimeSpan.FromSeconds(15);
     private const int ResumeAnalysisDelayMilliseconds = 1500;
     private const int DefaultBatteryStandbyHibernateTimeoutSeconds = 600;
     private const int PowerShellTimeoutMilliseconds = 10000;
@@ -136,6 +136,7 @@ public sealed class PowerController : IDisposable
     private readonly object _resumeEvaluationSync = new();
     private readonly object _statusSnapshotSync = new();
     private readonly object _activePowerPlanSync = new();
+    private static readonly string WindowsPowerShellPath = ResolveWindowsPowerShellPath();
     private readonly PowerNotificationWindow? _powerNotificationWindow;
     private readonly System.Threading.Timer _resumeTimer;
     private DateTimeOffset? _lastManualResumeSignalUtc;
@@ -145,6 +146,7 @@ public sealed class PowerController : IDisposable
     private bool _startupWarmupInProgress;
     private uint? _resumeProtectionArmedAtTick;
     private int _resumeEvaluationGeneration;
+    private int _statusSnapshotRefreshQueued;
     private bool _disposed;
     private AppSettings _settings;
     private StatusSnapshot _statusSnapshot = StatusSnapshot.Empty;
@@ -279,46 +281,39 @@ public sealed class PowerController : IDisposable
 
     private StatusSnapshot GetStatusSnapshot()
     {
-        lock (_stateSync)
+        StatusSnapshot snapshot;
+        lock (_statusSnapshotSync)
         {
+            snapshot = _statusSnapshot;
+        }
+
+        if (snapshot == StatusSnapshot.Empty)
+        {
+            InvalidateStatusSnapshot();
             lock (_statusSnapshotSync)
             {
-                if (_statusSnapshot != StatusSnapshot.Empty
-                    && DateTimeOffset.UtcNow - _statusSnapshot.GeneratedAtUtc <= StatusSnapshotMaxAge)
-                {
-                    return _statusSnapshot;
-                }
-
-                var wakeTimerStatus = EvaluateWakeTimerProtection();
-                var standbyConnectivityStatus = EvaluateStandbyConnectivityProtection();
-                var wifiDirectStatus = EvaluateWiFiDirectProtection();
-                var batteryStandbyHibernateStatus = EvaluateBatteryStandbyHibernateProtection();
-                var remoteWakeStatus = EvaluateKnownRemoteWakeProtection();
-
-                _statusSnapshot = new StatusSnapshot(
-                    DateTimeOffset.UtcNow,
-                    BuildCurrentStatus(),
-                    BuildProtectionRuleSummary(),
-                    BuildCapabilitySummary(remoteWakeStatus, wifiDirectStatus),
-                    BuildRiskSummary(wakeTimerStatus, standbyConnectivityStatus, wifiDirectStatus, batteryStandbyHibernateStatus, remoteWakeStatus),
-                    BuildPowerPlanSummary(),
-                    BuildManagedRemoteEntriesSummary(),
-                    wakeTimerStatus.QuickState,
-                    standbyConnectivityStatus.QuickState,
-                    wifiDirectStatus.QuickState,
-                    batteryStandbyHibernateStatus.QuickState,
-                    remoteWakeStatus.QuickState);
-
-                return _statusSnapshot;
+                snapshot = _statusSnapshot;
             }
         }
+
+        if (snapshot != StatusSnapshot.Empty
+            && DateTimeOffset.UtcNow - snapshot.GeneratedAtUtc > StatusSnapshotMaxAge
+            && StartupWarmupCompleted)
+        {
+            QueueStatusSnapshotRefresh();
+        }
+
+        return snapshot;
     }
 
     private void InvalidateStatusSnapshot()
     {
-        lock (_statusSnapshotSync)
+        lock (_stateSync)
         {
-            _statusSnapshot = StatusSnapshot.Empty;
+            lock (_statusSnapshotSync)
+            {
+                _statusSnapshot = BuildDeferredStatusSnapshot();
+            }
         }
     }
 
@@ -602,16 +597,16 @@ public sealed class PowerController : IDisposable
         {
             lock (_stateSync)
             {
-            _logger.Info("正在补全启动后的延迟状态校验。");
+                _logger.Info("正在补全启动后的延迟状态校验。");
 
-            RefreshWakeTimerPolicySummary();
-            RefreshStandbyConnectivityPolicySummary();
-            RefreshWiFiDirectAdapterPolicySummary();
-            RefreshBatteryStandbyHibernatePolicySummary();
-            RefreshKnownRemoteWakePolicySummary();
+                RefreshWakeTimerPolicySummary();
+                RefreshStandbyConnectivityPolicySummary();
+                RefreshWiFiDirectAdapterPolicySummary();
+                RefreshBatteryStandbyHibernatePolicySummary();
+                RefreshKnownRemoteWakePolicySummary();
                 RefreshAutostartPolicySummary();
 
-            _startupWarmupCompleted = true;
+                _startupWarmupCompleted = true;
                 shouldNotify = true;
                 InvalidateStatusSnapshot();
                 SaveSettingsSnapshot();
@@ -1978,7 +1973,7 @@ public sealed class PowerController : IDisposable
         {
             using var process = new Process();
             var encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
-            process.StartInfo.FileName = "powershell";
+            process.StartInfo.FileName = WindowsPowerShellPath;
             process.StartInfo.Arguments = $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encodedCommand}";
             process.StartInfo.CreateNoWindow = true;
             process.StartInfo.UseShellExecute = false;
@@ -2608,6 +2603,92 @@ public sealed class PowerController : IDisposable
         return string.Join("；", parts) + "。";
     }
 
+    private StatusSnapshot BuildDeferredStatusSnapshot()
+    {
+        return new StatusSnapshot(
+            DateTimeOffset.MinValue,
+            BuildCurrentStatus(),
+            BuildProtectionRuleSummary(),
+            BuildDeferredCapabilitySummary(),
+            BuildDeferredRiskSummary(),
+            BuildDeferredPowerPlanSummary(),
+            BuildManagedRemoteEntriesSummary(),
+            BuildDeferredQuickState(_settings.DisableWakeTimers),
+            BuildDeferredQuickState(_settings.DisableStandbyConnectivity),
+            BuildDeferredQuickState(_settings.DisableWiFiDirectAdapters),
+            BuildDeferredQuickState(_settings.EnforceBatteryStandbyHibernate),
+            BuildDeferredRemoteWakeQuickState());
+    }
+
+    private StatusSnapshot BuildValidatedStatusSnapshot()
+    {
+        var wakeTimerStatus = EvaluateWakeTimerProtection();
+        var standbyConnectivityStatus = EvaluateStandbyConnectivityProtection();
+        var wifiDirectStatus = EvaluateWiFiDirectProtection();
+        var batteryStandbyHibernateStatus = EvaluateBatteryStandbyHibernateProtection();
+        var remoteWakeStatus = EvaluateKnownRemoteWakeProtection();
+
+        return new StatusSnapshot(
+            DateTimeOffset.UtcNow,
+            BuildCurrentStatus(),
+            BuildProtectionRuleSummary(),
+            BuildCapabilitySummary(remoteWakeStatus, wifiDirectStatus),
+            BuildRiskSummary(wakeTimerStatus, standbyConnectivityStatus, wifiDirectStatus, batteryStandbyHibernateStatus, remoteWakeStatus),
+            BuildPowerPlanSummary(),
+            BuildManagedRemoteEntriesSummary(),
+            wakeTimerStatus.QuickState,
+            standbyConnectivityStatus.QuickState,
+            wifiDirectStatus.QuickState,
+            batteryStandbyHibernateStatus.QuickState,
+            remoteWakeStatus.QuickState);
+    }
+
+    private void QueueStatusSnapshotRefresh()
+    {
+        if (Interlocked.Exchange(ref _statusSnapshotRefreshQueued, 1) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(() =>
+        {
+            var shouldNotify = false;
+
+            try
+            {
+                StatusSnapshot snapshot;
+                lock (_stateSync)
+                {
+                    if (_disposed || !_startupWarmupCompleted)
+                    {
+                        return;
+                    }
+
+                    snapshot = BuildValidatedStatusSnapshot();
+                    lock (_statusSnapshotSync)
+                    {
+                        _statusSnapshot = snapshot;
+                    }
+
+                    shouldNotify = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"后台状态校验失败：{ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _statusSnapshotRefreshQueued, 0);
+            }
+
+            if (shouldNotify)
+            {
+                StateChanged?.Invoke(this, EventArgs.Empty);
+            }
+        });
+    }
+
     private string BuildDeferredCapabilitySummary()
     {
         var parts = new List<string>
@@ -2830,6 +2911,29 @@ public sealed class PowerController : IDisposable
         risks.Add("启动后详细校验尚未完成");
 
         return $"当前最主要风险：{string.Join("；", risks.Take(3))}。";
+    }
+
+    private string BuildDeferredPowerPlanSummary()
+    {
+        return _startupWarmupCompleted
+            ? "当前电源计划：正在后台校验"
+            : "当前电源计划：启动后后台校验中";
+    }
+
+    private static string BuildDeferredQuickState(bool enabled)
+    {
+        return enabled ? "当前：待校验" : "当前：未接管";
+    }
+
+    private string BuildDeferredRemoteWakeQuickState()
+    {
+        var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(_settings.CustomRemoteWakeEntries);
+        if (managedEntries.Count == 0)
+        {
+            return "当前：无规则";
+        }
+
+        return _settings.BlockKnownRemoteWakeRequests ? "当前：待校验" : "当前：未接管";
     }
 
     private string BuildPowerPlanSummary()
@@ -3160,6 +3264,16 @@ public sealed class PowerController : IDisposable
         using var identity = WindowsIdentity.GetCurrent();
         var principal = new WindowsPrincipal(identity);
         return principal.IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private static string ResolveWindowsPowerShellPath()
+    {
+        var candidate = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        return File.Exists(candidate) ? candidate : "powershell";
     }
 
     private enum ProtectionStatusKind

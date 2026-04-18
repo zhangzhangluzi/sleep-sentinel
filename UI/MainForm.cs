@@ -904,8 +904,14 @@ public sealed class MainForm : Form
     {
         var width = Math.Min(Math.Max(bounds.Width, MinimumWindowWidth), workingArea.Width);
         var height = Math.Min(Math.Max(bounds.Height, MinimumWindowHeight), workingArea.Height);
-        var x = Math.Min(Math.Max(bounds.X, workingArea.Left), workingArea.Right - width);
-        var y = Math.Min(Math.Max(bounds.Y, workingArea.Top), workingArea.Bottom - height);
+        var maxX = workingArea.Right - width;
+        var maxY = workingArea.Bottom - height;
+        var x = width >= workingArea.Width
+            ? workingArea.Left
+            : Math.Min(Math.Max(bounds.X, workingArea.Left), maxX);
+        var y = height >= workingArea.Height
+            ? workingArea.Top
+            : Math.Min(Math.Max(bounds.Y, workingArea.Top), maxY);
         return new Rectangle(x, y, width, height);
     }
 

@@ -12,6 +12,7 @@ public static class AutostartManager
     private const string ValueName = "SleepSentinel";
     private const string ElevatedTaskName = "SleepSentinel Elevated Autostart";
     private const int ProcessTimeoutMilliseconds = 10000;
+    private static readonly string WindowsPowerShellPath = ResolveWindowsPowerShellPath();
     private static readonly Regex CliXmlEnvelopeRegex = new(@"#<\s*CLIXML\s*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex CliXmlPayloadRegex = new(@"<Objs[\s\S]*?</Objs>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
@@ -272,7 +273,7 @@ if (Get-ScheduledTask -TaskName '{ElevatedTaskName}' -ErrorAction SilentlyContin
             using var process = new Process();
             var effectiveScript = "$ProgressPreference = 'SilentlyContinue'" + Environment.NewLine + script;
             var encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(effectiveScript));
-            process.StartInfo.FileName = "powershell";
+            process.StartInfo.FileName = WindowsPowerShellPath;
             process.StartInfo.Arguments = $"-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encodedCommand}";
             process.StartInfo.CreateNoWindow = true;
             process.StartInfo.UseShellExecute = false;
@@ -341,6 +342,16 @@ if (Get-ScheduledTask -TaskName '{ElevatedTaskName}' -ErrorAction SilentlyContin
         catch (InvalidOperationException)
         {
         }
+    }
+
+    private static string ResolveWindowsPowerShellPath()
+    {
+        var candidate = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        return File.Exists(candidate) ? candidate : "powershell";
     }
 
     private static string NormalizeExecutablePath(string? command)
