@@ -17,15 +17,28 @@
     <Description>Windows tray utility that protects sleep and hibernate behavior from unwanted wake-ups.</Description>
     <Company>Zhang</Company>
     <Authors>Zhang</Authors>
-    <AssemblyVersion>1.0.36.0</AssemblyVersion>
-    <FileVersion>1.0.36.0</FileVersion>
-    <Version>1.0.36</Version>
-    <InformationalVersion>1.0.36</InformationalVersion>
+    <AssemblyVersion>1.0.37.0</AssemblyVersion>
+    <FileVersion>1.0.37.0</FileVersion>
+    <Version>1.0.37</Version>
+    <InformationalVersion>1.0.37</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.0" />
   </ItemGroup>
+
+  <Target Name="PreparePublishOutput" BeforeTargets="GenerateSingleFileBundle">
+    <ItemGroup>
+      <PublishArtifactsToDelete Include="$(PublishDir)SleepSentinel.exe" />
+      <PublishArtifactsToDelete Include="$(PublishDir)SleepSentinel.pdb" />
+      <PublishArtifactsToDelete Include="$(PublishDir)SleepSentinel.deps.json" />
+      <PublishArtifactsToDelete Include="$(PublishDir)SleepSentinel.runtimeconfig.json" />
+      <PublishArtifactsToDelete Include="$(PublishDir)SleepSentinel-v*-win-x64.exe" />
+      <PublishCacheToDelete Include="$(IntermediateOutputPath)PublishOutputs.*.txt" />
+    </ItemGroup>
+    <Delete Files="@(PublishArtifactsToDelete)" />
+    <Delete Files="@(PublishCacheToDelete)" />
+  </Target>
 
   <Target Name="CreateVersionedPublishExe" AfterTargets="CopyFilesToPublishDirectory">
     <PropertyGroup>

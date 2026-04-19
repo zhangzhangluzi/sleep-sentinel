@@ -5,6 +5,7 @@ namespace SleepSentinel.Services;
 public sealed class PowerCfgService
 {
     private const int TimeoutMilliseconds = 3000;
+    private static readonly string PowerCfgPath = ResolvePowerCfgPath();
     private readonly FileLogger _logger;
 
     public PowerCfgService(FileLogger logger)
@@ -17,7 +18,7 @@ public sealed class PowerCfgService
         try
         {
             using var process = new Process();
-            process.StartInfo.FileName = "powercfg";
+            process.StartInfo.FileName = PowerCfgPath;
             process.StartInfo.Arguments = arguments;
             process.StartInfo.CreateNoWindow = true;
             process.StartInfo.UseShellExecute = false;
@@ -54,6 +55,14 @@ public sealed class PowerCfgService
             _logger.Error($"执行 powercfg {arguments} 失败：{ex.Message}");
             return $"powercfg {arguments} 调用失败：{ex.Message}";
         }
+    }
+
+    private static string ResolvePowerCfgPath()
+    {
+        var candidate = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "powercfg.exe");
+        return File.Exists(candidate) ? candidate : "powercfg";
     }
 
     private static void TryKillProcess(Process process)

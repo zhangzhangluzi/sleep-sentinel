@@ -147,6 +147,7 @@ public sealed class PowerController : IDisposable
     private uint? _resumeProtectionArmedAtTick;
     private int _resumeEvaluationGeneration;
     private int _statusSnapshotRefreshQueued;
+    private int _statusSnapshotRevision;
     private bool _disposed;
     private AppSettings _settings;
     private StatusSnapshot _statusSnapshot = StatusSnapshot.Empty;
@@ -242,21 +243,72 @@ public sealed class PowerController : IDisposable
 
     public AppSettings CurrentSettings => CloneCurrentSettings();
 
-    public string CurrentStatus => BuildCurrentStatus();
+    public string CurrentStatus
+    {
+        get
+        {
+            lock (_stateSync)
+            {
+                return BuildCurrentStatus(_settings);
+            }
+        }
+    }
 
-    public string CurrentProtectionRuleSummary => BuildProtectionRuleSummary();
+    public string CurrentProtectionRuleSummary
+    {
+        get
+        {
+            lock (_stateSync)
+            {
+                return BuildProtectionRuleSummary(_settings);
+            }
+        }
+    }
 
-    public string CurrentCapabilitySummary => _startupWarmupCompleted
-        ? GetStatusSnapshot().CapabilitySummary
-        : BuildDeferredCapabilitySummary();
+    public string CurrentCapabilitySummary
+    {
+        get
+        {
+            if (StartupWarmupCompleted)
+            {
+                return GetStatusSnapshot().CapabilitySummary;
+            }
 
-    public string CurrentRiskSummary => _startupWarmupCompleted
-        ? GetStatusSnapshot().RiskSummary
-        : BuildDeferredRiskSummary();
+            lock (_stateSync)
+            {
+                return BuildDeferredCapabilitySummary();
+            }
+        }
+    }
+
+    public string CurrentRiskSummary
+    {
+        get
+        {
+            if (StartupWarmupCompleted)
+            {
+                return GetStatusSnapshot().RiskSummary;
+            }
+
+            lock (_stateSync)
+            {
+                return BuildDeferredRiskSummary();
+            }
+        }
+    }
 
     public string CurrentPowerPlanSummary => GetStatusSnapshot().PowerPlanSummary;
 
-    public string CurrentManagedRemoteEntriesSummary => BuildManagedRemoteEntriesSummary();
+    public string CurrentManagedRemoteEntriesSummary
+    {
+        get
+        {
+            lock (_stateSync)
+            {
+                return BuildManagedRemoteEntriesSummary(_settings);
+            }
+        }
+    }
 
     public string CurrentWakeTimerQuickState => GetStatusSnapshot().WakeTimerQuickState;
 
@@ -310,6 +362,7 @@ public sealed class PowerController : IDisposable
     {
         lock (_stateSync)
         {
+            _statusSnapshotRevision++;
             lock (_statusSnapshotSync)
             {
                 _statusSnapshot = BuildDeferredStatusSnapshot();
@@ -1931,30 +1984,40 @@ public sealed class PowerController : IDisposable
 
     private string BuildCurrentStatus()
     {
-        var delaySeconds = Math.Max(3, _settings.ResumeProtectionDelaySeconds);
-        return _settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely
+        return BuildCurrentStatus(_settings);
+    }
+
+    private static string BuildCurrentStatus(AppSettings settings)
+    {
+        var delaySeconds = Math.Max(3, settings.ResumeProtectionDelaySeconds);
+        return settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely
             ? "无限期保持激活"
-            : (_settings.ResumeProtectionEnabled
-                ? $"遵循电源计划，恢复后 {delaySeconds} 秒自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}"
+            : (settings.ResumeProtectionEnabled
+                ? $"遵循电源计划，恢复后 {delaySeconds} 秒自动{DescribeResumeProtection(settings.ResumeProtectionMode)}"
                 : "遵循电源计划");
     }
 
     private string BuildProtectionRuleSummary()
     {
-        if (_settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely)
+        return BuildProtectionRuleSummary(_settings);
+    }
+
+    private static string BuildProtectionRuleSummary(AppSettings settings)
+    {
+        if (settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely)
         {
-            return $"当前处于无限保持唤醒模式，不执行恢复后自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。";
+            return $"当前处于无限保持唤醒模式，不执行恢复后自动{DescribeResumeProtection(settings.ResumeProtectionMode)}。";
         }
 
-        if (!_settings.ResumeProtectionEnabled)
+        if (!settings.ResumeProtectionEnabled)
         {
-            return $"恢复保护已关闭，系统恢复后不会自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。";
+            return $"恢复保护已关闭，系统恢复后不会自动{DescribeResumeProtection(settings.ResumeProtectionMode)}。";
         }
 
-        var resumeAction = DescribeResumeProtection(_settings.ResumeProtectionMode);
-        var delaySeconds = Math.Max(3, _settings.ResumeProtectionDelaySeconds);
+        var resumeAction = DescribeResumeProtection(settings.ResumeProtectionMode);
+        var delaySeconds = Math.Max(3, settings.ResumeProtectionDelaySeconds);
 
-        if (_settings.ResumeProtectionOnlyForUnattendedWake)
+        if (settings.ResumeProtectionOnlyForUnattendedWake)
         {
             return $"人工行为（键盘、鼠标、开盖、解锁、控制台/远程接管、登录）恢复后跳过自动{resumeAction}；其他恢复（软件、定时器、设备、来源不明）会在 {delaySeconds} 秒后自动{resumeAction}。";
         }
@@ -2535,14 +2598,20 @@ public sealed class PowerController : IDisposable
         }
     }
 
-    private int GetBatteryStandbyHibernateTimeoutSeconds()
+    private static int NormalizeBatteryStandbyHibernateTimeoutSeconds(int timeoutSeconds)
     {
-        _settings.BatteryStandbyHibernateTimeoutSeconds = Math.Clamp(
-            _settings.BatteryStandbyHibernateTimeoutSeconds <= 0
+        return Math.Clamp(
+            timeoutSeconds <= 0
                 ? DefaultBatteryStandbyHibernateTimeoutSeconds
-                : _settings.BatteryStandbyHibernateTimeoutSeconds,
+                : timeoutSeconds,
             180,
             14400);
+    }
+
+    private int GetBatteryStandbyHibernateTimeoutSeconds()
+    {
+        _settings.BatteryStandbyHibernateTimeoutSeconds = NormalizeBatteryStandbyHibernateTimeoutSeconds(
+            _settings.BatteryStandbyHibernateTimeoutSeconds);
         return _settings.BatteryStandbyHibernateTimeoutSeconds;
     }
 
@@ -2582,6 +2651,15 @@ public sealed class PowerController : IDisposable
 
     private string BuildCapabilitySummary(ProtectionStatus remoteWakeStatus, ProtectionStatus wifiDirectStatus)
     {
+        return BuildCapabilitySummary(_settings, _settingsStore.LastSaveError, remoteWakeStatus, wifiDirectStatus);
+    }
+
+    private string BuildCapabilitySummary(
+        AppSettings settings,
+        string? lastSaveError,
+        ProtectionStatus remoteWakeStatus,
+        ProtectionStatus wifiDirectStatus)
+    {
         var elevated = IsRunningElevated();
         var parts = new List<string>
         {
@@ -2595,24 +2673,24 @@ public sealed class PowerController : IDisposable
             parts.Add("远控拦截、Wi-Fi Direct 适配器接管、请求替代和部分 powercfg 写入可能受限");
         }
 
-        if (_settings.StartWithWindows && !string.IsNullOrWhiteSpace(_settings.AutostartPolicySummary))
+        if (settings.StartWithWindows && !string.IsNullOrWhiteSpace(settings.AutostartPolicySummary))
         {
-            parts.Add($"开机自启：{_settings.AutostartPolicySummary}");
+            parts.Add($"开机自启：{settings.AutostartPolicySummary}");
         }
 
-        if (_settings.BlockKnownRemoteWakeRequests
+        if (settings.BlockKnownRemoteWakeRequests
             && remoteWakeStatus.Kind is ProtectionStatusKind.Partial or ProtectionStatusKind.Missing or ProtectionStatusKind.Unknown)
         {
             parts.Add("远控拦截最近一次应用未完全成功");
         }
 
-        if (_settings.DisableWiFiDirectAdapters
+        if (settings.DisableWiFiDirectAdapters
             && wifiDirectStatus.Kind is ProtectionStatusKind.Partial or ProtectionStatusKind.Missing or ProtectionStatusKind.Unknown)
         {
             parts.Add("Wi-Fi Direct 接管最近一次应用未完全成功");
         }
 
-        if (!string.IsNullOrWhiteSpace(_settingsStore.LastSaveError))
+        if (!string.IsNullOrWhiteSpace(lastSaveError))
         {
             parts.Add("最近一次配置写入失败，当前变更可能仅在本次运行有效");
         }
@@ -2639,20 +2717,25 @@ public sealed class PowerController : IDisposable
 
     private StatusSnapshot BuildValidatedStatusSnapshot()
     {
-        var wakeTimerStatus = EvaluateWakeTimerProtection();
-        var standbyConnectivityStatus = EvaluateStandbyConnectivityProtection();
-        var wifiDirectStatus = EvaluateWiFiDirectProtection();
-        var batteryStandbyHibernateStatus = EvaluateBatteryStandbyHibernateProtection();
-        var remoteWakeStatus = EvaluateKnownRemoteWakeProtection();
+        return BuildValidatedStatusSnapshot(_settings, _settingsStore.LastSaveError);
+    }
+
+    private StatusSnapshot BuildValidatedStatusSnapshot(AppSettings settings, string? lastSaveError)
+    {
+        var wakeTimerStatus = EvaluateWakeTimerProtection(settings);
+        var standbyConnectivityStatus = EvaluateStandbyConnectivityProtection(settings);
+        var wifiDirectStatus = EvaluateWiFiDirectProtection(settings);
+        var batteryStandbyHibernateStatus = EvaluateBatteryStandbyHibernateProtection(settings);
+        var remoteWakeStatus = EvaluateKnownRemoteWakeProtection(settings);
 
         return new StatusSnapshot(
             DateTimeOffset.UtcNow,
-            BuildCurrentStatus(),
-            BuildProtectionRuleSummary(),
-            BuildCapabilitySummary(remoteWakeStatus, wifiDirectStatus),
-            BuildRiskSummary(wakeTimerStatus, standbyConnectivityStatus, wifiDirectStatus, batteryStandbyHibernateStatus, remoteWakeStatus),
+            BuildCurrentStatus(settings),
+            BuildProtectionRuleSummary(settings),
+            BuildCapabilitySummary(settings, lastSaveError, remoteWakeStatus, wifiDirectStatus),
+            BuildRiskSummary(settings, lastSaveError, wakeTimerStatus, standbyConnectivityStatus, wifiDirectStatus, batteryStandbyHibernateStatus, remoteWakeStatus),
             BuildPowerPlanSummary(),
-            BuildManagedRemoteEntriesSummary(),
+            BuildManagedRemoteEntriesSummary(settings),
             wakeTimerStatus.QuickState,
             standbyConnectivityStatus.QuickState,
             wifiDirectStatus.QuickState,
@@ -2670,10 +2753,12 @@ public sealed class PowerController : IDisposable
         _ = Task.Run(() =>
         {
             var shouldNotify = false;
+            var snapshotRevision = 0;
 
             try
             {
-                StatusSnapshot snapshot;
+                AppSettings settingsSnapshot;
+                string? lastSaveError;
                 lock (_stateSync)
                 {
                     if (_disposed || !_startupWarmupCompleted)
@@ -2681,7 +2766,20 @@ public sealed class PowerController : IDisposable
                         return;
                     }
 
-                    snapshot = BuildValidatedStatusSnapshot();
+                    settingsSnapshot = _settings.Clone();
+                    lastSaveError = _settingsStore.LastSaveError;
+                    snapshotRevision = _statusSnapshotRevision;
+                }
+
+                var snapshot = BuildValidatedStatusSnapshot(settingsSnapshot, lastSaveError);
+
+                lock (_stateSync)
+                {
+                    if (_disposed || !_startupWarmupCompleted || snapshotRevision != _statusSnapshotRevision)
+                    {
+                        return;
+                    }
+
                     lock (_statusSnapshotSync)
                     {
                         _statusSnapshot = snapshot;
@@ -2731,9 +2829,14 @@ public sealed class PowerController : IDisposable
 
     private ProtectionStatus EvaluateWakeTimerProtection()
     {
+        return EvaluateWakeTimerProtection(_settings);
+    }
+
+    private ProtectionStatus EvaluateWakeTimerProtection(AppSettings settings)
+    {
         if (!TryGetCurrentWakeTimerIndices(out var acValue, out var dcValue))
         {
-            return _settings.DisableWakeTimers
+            return settings.DisableWakeTimers
                 ? new ProtectionStatus(ProtectionStatusKind.Unknown, "当前：待验证")
                 : new ProtectionStatus(ProtectionStatusKind.Missing, "当前：未接管");
         }
@@ -2741,13 +2844,18 @@ public sealed class PowerController : IDisposable
         var disabledCount = (acValue == WakeTimerDisabledValue ? 1 : 0) + (dcValue == WakeTimerDisabledValue ? 1 : 0);
         return disabledCount switch
         {
-            2 => new ProtectionStatus(ProtectionStatusKind.Applied, _settings.DisableWakeTimers ? "当前：已拦截" : "当前：系统已拦截"),
-            > 0 => new ProtectionStatus(ProtectionStatusKind.Partial, _settings.DisableWakeTimers ? "当前：部分拦截" : "当前：部分拦截"),
-            _ => new ProtectionStatus(ProtectionStatusKind.Missing, _settings.DisableWakeTimers ? "当前：未生效" : "当前：未接管")
+            2 => new ProtectionStatus(ProtectionStatusKind.Applied, settings.DisableWakeTimers ? "当前：已拦截" : "当前：系统已拦截"),
+            > 0 => new ProtectionStatus(ProtectionStatusKind.Partial, settings.DisableWakeTimers ? "当前：部分拦截" : "当前：部分拦截"),
+            _ => new ProtectionStatus(ProtectionStatusKind.Missing, settings.DisableWakeTimers ? "当前：未生效" : "当前：未接管")
         };
     }
 
     private ProtectionStatus EvaluateStandbyConnectivityProtection()
+    {
+        return EvaluateStandbyConnectivityProtection(_settings);
+    }
+
+    private ProtectionStatus EvaluateStandbyConnectivityProtection(AppSettings settings)
     {
         if (!TryGetCurrentStandbyConnectivityIndices(
                 out var connectivityAcValue,
@@ -2755,7 +2863,7 @@ public sealed class PowerController : IDisposable
                 out var disconnectedAcValue,
                 out var disconnectedDcValue))
         {
-            return _settings.DisableStandbyConnectivity
+            return settings.DisableStandbyConnectivity
                 ? new ProtectionStatus(ProtectionStatusKind.Unknown, "当前：待验证")
                 : new ProtectionStatus(ProtectionStatusKind.Missing, "当前：未接管");
         }
@@ -2767,17 +2875,22 @@ public sealed class PowerController : IDisposable
             (disconnectedDcValue == DisconnectedStandbyModeAggressiveValue ? 1 : 0);
         return matchCount switch
         {
-            4 => new ProtectionStatus(ProtectionStatusKind.Applied, _settings.DisableStandbyConnectivity ? "当前：已拦截" : "当前：系统已拦截"),
-            > 0 => new ProtectionStatus(ProtectionStatusKind.Partial, _settings.DisableStandbyConnectivity ? "当前：部分拦截" : "当前：部分拦截"),
-            _ => new ProtectionStatus(ProtectionStatusKind.Missing, _settings.DisableStandbyConnectivity ? "当前：未生效" : "当前：未接管")
+            4 => new ProtectionStatus(ProtectionStatusKind.Applied, settings.DisableStandbyConnectivity ? "当前：已拦截" : "当前：系统已拦截"),
+            > 0 => new ProtectionStatus(ProtectionStatusKind.Partial, settings.DisableStandbyConnectivity ? "当前：部分拦截" : "当前：部分拦截"),
+            _ => new ProtectionStatus(ProtectionStatusKind.Missing, settings.DisableStandbyConnectivity ? "当前：未生效" : "当前：未接管")
         };
     }
 
     private ProtectionStatus EvaluateWiFiDirectProtection()
     {
+        return EvaluateWiFiDirectProtection(_settings);
+    }
+
+    private ProtectionStatus EvaluateWiFiDirectProtection(AppSettings settings)
+    {
         if (!TryGetWiFiDirectAdapters(out var adapters, out _))
         {
-            return _settings.DisableWiFiDirectAdapters
+            return settings.DisableWiFiDirectAdapters
                 ? new ProtectionStatus(ProtectionStatusKind.Unknown, "当前：待验证")
                 : new ProtectionStatus(ProtectionStatusKind.Missing, "当前：未接管");
         }
@@ -2790,43 +2903,53 @@ public sealed class PowerController : IDisposable
         var disabledCount = adapters.Count(static adapter => adapter.IsDisabled);
         if (disabledCount == adapters.Count)
         {
-            return new ProtectionStatus(ProtectionStatusKind.Applied, _settings.DisableWiFiDirectAdapters ? "当前：已禁用" : "当前：系统已禁用");
+            return new ProtectionStatus(ProtectionStatusKind.Applied, settings.DisableWiFiDirectAdapters ? "当前：已禁用" : "当前：系统已禁用");
         }
 
         if (disabledCount > 0)
         {
-            return new ProtectionStatus(ProtectionStatusKind.Partial, _settings.DisableWiFiDirectAdapters ? "当前：部分禁用" : "当前：部分禁用");
+            return new ProtectionStatus(ProtectionStatusKind.Partial, settings.DisableWiFiDirectAdapters ? "当前：部分禁用" : "当前：部分禁用");
         }
 
-        return new ProtectionStatus(ProtectionStatusKind.Missing, _settings.DisableWiFiDirectAdapters ? "当前：未生效" : "当前：未接管");
+        return new ProtectionStatus(ProtectionStatusKind.Missing, settings.DisableWiFiDirectAdapters ? "当前：未生效" : "当前：未接管");
     }
 
     private ProtectionStatus EvaluateBatteryStandbyHibernateProtection()
     {
+        return EvaluateBatteryStandbyHibernateProtection(_settings);
+    }
+
+    private ProtectionStatus EvaluateBatteryStandbyHibernateProtection(AppSettings settings)
+    {
         if (!TryGetCurrentHibernateAfterStandbyIndices(out _, out var dcValue))
         {
-            return _settings.EnforceBatteryStandbyHibernate
+            return settings.EnforceBatteryStandbyHibernate
                 ? new ProtectionStatus(ProtectionStatusKind.Unknown, "当前：待验证")
                 : new ProtectionStatus(ProtectionStatusKind.Missing, "当前：未接管");
         }
 
-        var timeoutSeconds = GetBatteryStandbyHibernateTimeoutSeconds();
+        var timeoutSeconds = NormalizeBatteryStandbyHibernateTimeoutSeconds(settings.BatteryStandbyHibernateTimeoutSeconds);
         if (dcValue > 0 && dcValue != HibernateAfterStandbyFallbackRestoreDcValue && dcValue <= timeoutSeconds)
         {
-            return new ProtectionStatus(ProtectionStatusKind.Applied, _settings.EnforceBatteryStandbyHibernate ? "当前：已兜底" : "当前：系统已兜底");
+            return new ProtectionStatus(ProtectionStatusKind.Applied, settings.EnforceBatteryStandbyHibernate ? "当前：已兜底" : "当前：系统已兜底");
         }
 
         if (dcValue > 0 && dcValue != HibernateAfterStandbyFallbackRestoreDcValue)
         {
-            return new ProtectionStatus(ProtectionStatusKind.Partial, _settings.EnforceBatteryStandbyHibernate ? "当前：兜底较弱" : "当前：系统已兜底");
+            return new ProtectionStatus(ProtectionStatusKind.Partial, settings.EnforceBatteryStandbyHibernate ? "当前：兜底较弱" : "当前：系统已兜底");
         }
 
-        return new ProtectionStatus(ProtectionStatusKind.Missing, _settings.EnforceBatteryStandbyHibernate ? "当前：未生效" : "当前：未接管");
+        return new ProtectionStatus(ProtectionStatusKind.Missing, settings.EnforceBatteryStandbyHibernate ? "当前：未生效" : "当前：未接管");
     }
 
     private ProtectionStatus EvaluateKnownRemoteWakeProtection()
     {
-        var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(_settings.CustomRemoteWakeEntries);
+        return EvaluateKnownRemoteWakeProtection(_settings);
+    }
+
+    private ProtectionStatus EvaluateKnownRemoteWakeProtection(AppSettings settings)
+    {
+        var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(settings.CustomRemoteWakeEntries);
         if (managedEntries.Count == 0)
         {
             return new ProtectionStatus(ProtectionStatusKind.NotApplicable, "当前：无规则");
@@ -2835,18 +2958,20 @@ public sealed class PowerController : IDisposable
         var appliedCount = CountKnownRemoteRequestOverrides(managedEntries, static value => value == FullRequestOverrideMask);
         if (appliedCount == managedEntries.Count)
         {
-            return new ProtectionStatus(ProtectionStatusKind.Applied, _settings.BlockKnownRemoteWakeRequests ? "当前：已拦截" : "当前：系统已拦截");
+            return new ProtectionStatus(ProtectionStatusKind.Applied, settings.BlockKnownRemoteWakeRequests ? "当前：已拦截" : "当前：系统已拦截");
         }
 
         if (appliedCount > 0)
         {
-            return new ProtectionStatus(ProtectionStatusKind.Partial, _settings.BlockKnownRemoteWakeRequests ? "当前：部分拦截" : "当前：部分拦截");
+            return new ProtectionStatus(ProtectionStatusKind.Partial, settings.BlockKnownRemoteWakeRequests ? "当前：部分拦截" : "当前：部分拦截");
         }
 
-        return new ProtectionStatus(ProtectionStatusKind.Missing, _settings.BlockKnownRemoteWakeRequests ? "当前：未生效" : "当前：未接管");
+        return new ProtectionStatus(ProtectionStatusKind.Missing, settings.BlockKnownRemoteWakeRequests ? "当前：未生效" : "当前：未接管");
     }
 
     private string BuildRiskSummary(
+        AppSettings settings,
+        string? lastSaveError,
         ProtectionStatus wakeTimerStatus,
         ProtectionStatus standbyConnectivityStatus,
         ProtectionStatus wifiDirectStatus,
@@ -2855,49 +2980,49 @@ public sealed class PowerController : IDisposable
     {
         var risks = new List<string>();
 
-        if (_settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely)
+        if (settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely)
         {
             risks.Add("当前处于无限保持唤醒模式");
         }
         else
         {
-            if (!_settings.ResumeProtectionEnabled)
+            if (!settings.ResumeProtectionEnabled)
             {
                 risks.Add("恢复保护已关闭");
             }
 
-            if (_settings.DisableWakeTimers
+            if (settings.DisableWakeTimers
                 && wakeTimerStatus.Kind is ProtectionStatusKind.Missing or ProtectionStatusKind.Partial or ProtectionStatusKind.Unknown)
             {
                 risks.Add("唤醒定时器拦截未完全生效");
             }
 
-            if (_settings.DisableStandbyConnectivity
+            if (settings.DisableStandbyConnectivity
                 && standbyConnectivityStatus.Kind is ProtectionStatusKind.Missing or ProtectionStatusKind.Partial or ProtectionStatusKind.Unknown)
             {
                 risks.Add("待机联网拦截未完全生效");
             }
 
-            if (_settings.DisableWiFiDirectAdapters
+            if (settings.DisableWiFiDirectAdapters
                 && wifiDirectStatus.Kind is ProtectionStatusKind.Missing or ProtectionStatusKind.Partial or ProtectionStatusKind.Unknown)
             {
                 risks.Add("Wi-Fi Direct 稳态未完全生效");
             }
 
-            if (_settings.EnforceBatteryStandbyHibernate
+            if (settings.EnforceBatteryStandbyHibernate
                 && batteryStandbyHibernateStatus.Kind is ProtectionStatusKind.Missing or ProtectionStatusKind.Partial or ProtectionStatusKind.Unknown)
             {
                 risks.Add("电池兜底休眠未完全生效");
             }
         }
 
-        if (_settings.BlockKnownRemoteWakeRequests
+        if (settings.BlockKnownRemoteWakeRequests
             && remoteWakeStatus.Kind is ProtectionStatusKind.Missing or ProtectionStatusKind.Partial or ProtectionStatusKind.Unknown)
         {
             risks.Add("远控保活拦截未完全生效");
         }
 
-        if (!string.IsNullOrWhiteSpace(_settingsStore.LastSaveError))
+        if (!string.IsNullOrWhiteSpace(lastSaveError))
         {
             risks.Add("最近一次配置写入失败，重启后部分变更可能丢失");
         }
@@ -2962,7 +3087,12 @@ public sealed class PowerController : IDisposable
 
     private string BuildManagedRemoteEntriesSummary()
     {
-        var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(_settings.CustomRemoteWakeEntries);
+        return BuildManagedRemoteEntriesSummary(_settings);
+    }
+
+    private static string BuildManagedRemoteEntriesSummary(AppSettings settings)
+    {
+        var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(settings.CustomRemoteWakeEntries);
         var customCount = managedEntries.Count(static entry => entry.Product == "自定义");
         var builtInCount = managedEntries.Count - customCount;
         return customCount == 0
