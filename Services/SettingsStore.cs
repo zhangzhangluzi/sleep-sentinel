@@ -68,15 +68,15 @@ public sealed class SettingsStore
 
         try
         {
-            return ReadSettingsFileUnsafe(SettingsPath) ?? BackupAndResetSettingsUnsafe();
+            return ReadSettingsFileUnsafe(SettingsPath) ?? RecoverFromInvalidSettingsUnsafe();
         }
         catch (JsonException)
         {
-            return BackupAndResetSettingsUnsafe();
+            return RecoverFromInvalidSettingsUnsafe();
         }
         catch (NotSupportedException)
         {
-            return BackupAndResetSettingsUnsafe();
+            return RecoverFromInvalidSettingsUnsafe();
         }
         catch (IOException)
         {
@@ -115,9 +115,15 @@ public sealed class SettingsStore
         return defaults;
     }
 
-    private AppSettings BackupAndResetSettingsUnsafe()
+    private AppSettings RecoverFromInvalidSettingsUnsafe()
     {
         TryBackupCorruptedSettingsUnsafe();
+        if (TryLoadLastKnownGoodUnsafe(out var recovered))
+        {
+            TrySaveUnsafe(recovered);
+            return recovered;
+        }
+
         return CreateDefaultSettingsUnsafe();
     }
 

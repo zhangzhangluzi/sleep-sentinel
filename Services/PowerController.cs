@@ -1763,7 +1763,7 @@ public sealed class PowerController : IDisposable
                     break;
 
                 case PowerModes.StatusChange:
-                    if (!ReapplyManagedPoliciesForActivePowerPlanIfChanged("电源状态变化"))
+                    if (!ReapplyManagedPoliciesForCurrentPowerPlan("电源状态变化"))
                     {
                         StateChanged?.Invoke(this, EventArgs.Empty);
                     }
@@ -1779,7 +1779,7 @@ public sealed class PowerController : IDisposable
             return;
         }
 
-        _ = ReapplyManagedPoliciesForActivePowerPlanIfChanged($"系统偏好变化（{e.Category}）");
+        _ = ReapplyManagedPoliciesForCurrentPowerPlan($"系统偏好变化（{e.Category}）", forceReapplyForCurrentPlan: true);
     }
 
     private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -2461,7 +2461,7 @@ public sealed class PowerController : IDisposable
         }
     }
 
-    private bool ReapplyManagedPoliciesForActivePowerPlanIfChanged(string reason)
+    private bool ReapplyManagedPoliciesForCurrentPowerPlan(string reason, bool forceReapplyForCurrentPlan = false)
     {
         lock (_stateSync)
         {
@@ -2470,9 +2470,11 @@ public sealed class PowerController : IDisposable
                 return false;
             }
 
+            var planChanged = false;
             lock (_activePowerPlanSync)
             {
-                if (string.Equals(_activePowerPlanKey, planId, StringComparison.OrdinalIgnoreCase))
+                planChanged = !string.Equals(_activePowerPlanKey, planId, StringComparison.OrdinalIgnoreCase);
+                if (!planChanged && !forceReapplyForCurrentPlan)
                 {
                     return false;
                 }
@@ -2481,11 +2483,18 @@ public sealed class PowerController : IDisposable
             }
 
             InvalidateStatusSnapshot();
-            _logger.Info($"检测到当前电源计划已切换为 {planName} ({planId})，正在重新应用当前计划相关策略。来源：{reason}。");
+            _logger.Info(
+                planChanged
+                    ? $"检测到当前电源计划已切换为 {planName} ({planId})，正在重新应用当前计划相关策略。来源：{reason}。"
+                    : $"检测到当前电源计划 {planName} ({planId}) 的配置可能已变化，正在重新核验并恢复当前计划相关策略。来源：{reason}。");
 
             if (_settings.DisableWakeTimers)
             {
-                CaptureWakeTimerRestoreSnapshotIfNeeded();
+                if (planChanged)
+                {
+                    CaptureWakeTimerRestoreSnapshotIfNeeded();
+                }
+
                 ApplyWakeTimerPolicy();
             }
             else
@@ -2495,7 +2504,11 @@ public sealed class PowerController : IDisposable
 
             if (_settings.DisableStandbyConnectivity)
             {
-                CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
+                if (planChanged)
+                {
+                    CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
+                }
+
                 ApplyStandbyConnectivityPolicy();
             }
             else
@@ -2505,7 +2518,11 @@ public sealed class PowerController : IDisposable
 
             if (_settings.EnforceBatteryStandbyHibernate)
             {
-                CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
+                if (planChanged)
+                {
+                    CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
+                }
+
                 ApplyBatteryStandbyHibernatePolicy();
             }
             else

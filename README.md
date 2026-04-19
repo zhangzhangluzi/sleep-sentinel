@@ -13,10 +13,16 @@ SleepSentinel 是一个 Windows 托盘常驻工具，目标是解决两类场景
   - `无限保持唤醒（类似 PowerToys Awake）`
 - 恢复保护
   - 监听系统 `Suspend/Resume`
-  - 记录 `powercfg /lastwake` 和 `powercfg /waketimers`
+  - 结合 `powercfg`、事件日志和 SleepStudy 做恢复来源判断
   - 支持“仅对疑似非人工唤醒执行保护”
   - 在恢复后延迟几秒，自动再次睡眠、休眠或锁屏
-- 可选接管当前电源计划，把 `Wake Timers` 设为禁用
+- 可选接管当前电源计划
+  - 禁用 `Wake Timers`
+  - 关闭待机联网
+  - 设置电池供电下待机一段时间后自动转入休眠
+- 可选禁用 `Microsoft Wi-Fi Direct Virtual Adapter`
+- 可选拦截常见远程软件的 `DISPLAY / SYSTEM / AWAYMODE` 保持唤醒请求
+- 支持自定义远控拦截名单与自动建议
 - 本地日志
 - 一键导出诊断报告
 - 开机自启
@@ -91,7 +97,7 @@ GitHub Release 也会自动附带：
 - `powercfg /lastwake`
 - `powercfg /waketimers`
 
-## 后续可扩展
+## 说明
 
-- 加入 Windows 事件日志来源分析
-- 增加“禁用当前电源计划唤醒定时器”的可选开关
+- `SleepSentinel` 会尽量把“同一电源计划里的关键设置被系统或其他软件改动”拉回到应用当前托管状态。
+- 主配置文件损坏时，会优先回退到最近一次成功写入的 `last-known-good` 配置，再退回默认设置。
