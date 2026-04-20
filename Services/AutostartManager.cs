@@ -27,11 +27,11 @@ public static class AutostartManager
 
     public static AutostartStatus QueryStatus(bool enabled, bool requireElevated)
     {
-        var runKeyEnabled = IsRunKeyEnabled();
+        var runKeyStatus = QueryRunKeyStatus();
         var scheduledTask = QueryScheduledTask();
         if (scheduledTask.QueryFailed)
         {
-            return BuildScheduledTaskQueryFailureStatus(enabled, requireElevated, runKeyEnabled, scheduledTask.QueryError);
+            return BuildScheduledTaskQueryFailureStatus(enabled, requireElevated, runKeyStatus, scheduledTask.QueryError);
         }
 
         var elevatedTaskEnabled = scheduledTask.Exists
@@ -40,10 +40,10 @@ public static class AutostartManager
 
         var actualMode = elevatedTaskEnabled
             ? AutostartMode.ElevatedScheduledTask
-            : runKeyEnabled
+            : runKeyStatus.Exists
                 ? AutostartMode.RunKey
                 : AutostartMode.Disabled;
-        var hasConflict = runKeyEnabled && elevatedTaskEnabled;
+        var hasConflict = runKeyStatus.Exists && elevatedTaskEnabled;
 
         if (!enabled)
         {
@@ -53,25 +53,29 @@ public static class AutostartManager
                 matchesDesired,
                 matchesDesired
                     ? "开机自启未启用"
-                    : "开机自启存在残留配置，建议重新应用");
+                    : runKeyStatus.Exists
+                        ? "开机自启存在普通权限残留配置，建议重新应用"
+                        : "开机自启存在残留配置，建议重新应用");
         }
 
         if (requireElevated)
         {
-            var matchesDesired = elevatedTaskEnabled && !runKeyEnabled;
+            var matchesDesired = elevatedTaskEnabled && !runKeyStatus.Exists;
             return new AutostartStatus(
                 actualMode,
                 matchesDesired,
                 matchesDesired
                     ? "开机自启将通过计划任务以最高权限运行"
-                    : runKeyEnabled
-                        ? "开机自启当前仍是普通权限启动，重启后高权限保护可能无法自动接管"
+                    : runKeyStatus.Exists
+                        ? runKeyStatus.MatchesExecutablePath
+                            ? "开机自启当前仍是普通权限启动，重启后高权限保护可能无法自动接管"
+                            : "检测到普通权限开机自启残留指向旧路径，建议重新应用切回最高权限任务"
                         : scheduledTask.Exists && !scheduledTask.MatchesExecutablePath
                             ? "检测到同名计划任务，但目标程序不是当前版本，建议重新应用开机自启"
                             : "开机自启尚未配置为最高权限启动");
         }
 
-        var desiredRunKeyOnly = runKeyEnabled && !elevatedTaskEnabled;
+        var desiredRunKeyOnly = runKeyStatus.MatchesExecutablePath && !elevatedTaskEnabled;
         return new AutostartStatus(
             actualMode,
             desiredRunKeyOnly,
@@ -79,6 +83,8 @@ public static class AutostartManager
                 ? "开机自启将按当前用户普通权限运行"
                 : elevatedTaskEnabled
                     ? "开机自启当前仍是最高权限计划任务，建议重新应用切回普通模式"
+                    : runKeyStatus.Exists
+                        ? "检测到普通权限开机自启残留指向旧路径，建议重新应用"
                     : "开机自启尚未配置");
     }
 
@@ -102,9 +108,9 @@ public static class AutostartManager
         return verified;
     }
 
-    private static AutostartStatus BuildScheduledTaskQueryFailureStatus(bool enabled, bool requireElevated, bool runKeyEnabled, string queryError)
+    private static AutostartStatus BuildScheduledTaskQueryFailureStatus(bool enabled, bool requireElevated, RunKeyStatus runKeyStatus, string queryError)
     {
-        var actualMode = runKeyEnabled ? AutostartMode.RunKey : AutostartMode.Disabled;
+        var actualMode = runKeyStatus.Exists ? AutostartMode.RunKey : AutostartMode.Disabled;
 
         if (!enabled)
         {
@@ -120,8 +126,10 @@ public static class AutostartManager
             return new AutostartStatus(
                 actualMode,
                 false,
-                runKeyEnabled
-                    ? $"开机自启当前仍是普通权限启动，且最高权限计划任务状态读取失败：{queryError}"
+                runKeyStatus.Exists
+                    ? runKeyStatus.MatchesExecutablePath
+                        ? $"开机自启当前仍是普通权限启动，且最高权限计划任务状态读取失败：{queryError}"
+                        : $"检测到普通权限开机自启残留指向旧路径，且最高权限计划任务状态读取失败：{queryError}"
                     : $"最高权限开机自启状态读取失败：{queryError}",
                 VerificationFailed: true);
         }
@@ -129,8 +137,10 @@ public static class AutostartManager
         return new AutostartStatus(
             actualMode,
             false,
-            runKeyEnabled
-                ? $"普通开机自启已检测到，但计划任务状态读取失败，无法确认是否有残留最高权限任务：{queryError}"
+            runKeyStatus.Exists
+                ? runKeyStatus.MatchesExecutablePath
+                    ? $"普通开机自启已检测到，但计划任务状态读取失败，无法确认是否有残留最高权限任务：{queryError}"
+                    : $"检测到普通开机自启残留指向旧路径，且计划任务状态读取失败：{queryError}"
                 : $"开机自启状态读取失败：{queryError}",
             VerificationFailed: true);
     }
@@ -180,14 +190,21 @@ public static class AutostartManager
         key?.DeleteValue(ValueName, false);
     }
 
-    private static bool IsRunKeyEnabled()
+    private static RunKeyStatus QueryRunKeyStatus()
     {
         using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, false);
         var configuredCommand = key?.GetValue(ValueName) as string;
-        return string.Equals(
-            NormalizeExecutablePath(configuredCommand),
-            NormalizeExecutablePath(BuildCommand(Application.ExecutablePath)),
-            StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(configuredCommand))
+        {
+            return default;
+        }
+
+        return new RunKeyStatus(
+            Exists: true,
+            MatchesExecutablePath: string.Equals(
+                NormalizeExecutablePath(configuredCommand),
+                NormalizeExecutablePath(BuildCommand(Application.ExecutablePath)),
+                StringComparison.OrdinalIgnoreCase));
     }
 
     private static ScheduledTaskInfo QueryScheduledTask()
@@ -403,4 +420,6 @@ if (Get-ScheduledTask -TaskName '{ElevatedTaskName}' -ErrorAction SilentlyContin
     {
         public bool QueryFailed => !string.IsNullOrWhiteSpace(QueryError);
     }
+
+    private readonly record struct RunKeyStatus(bool Exists, bool MatchesExecutablePath);
 }

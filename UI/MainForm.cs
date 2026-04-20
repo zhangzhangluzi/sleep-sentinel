@@ -330,9 +330,11 @@ public sealed class MainForm : Form
         var reapplyBatteryStandbyHibernateButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyBatteryStandbyHibernateButton.Click += (_, _) =>
         {
-            ApplyUiSettingsImmediately();
-            _controller.ReapplyBatteryStandbyHibernatePolicy();
-            SyncUiFromController();
+            if (!ApplyUiSettingsIfChanged())
+            {
+                _controller.ReapplyBatteryStandbyHibernatePolicy();
+                SyncUiFromController();
+            }
         };
         _batteryStandbyHibernateQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         batteryStandbyHibernateActions.Controls.Add(_enforceBatteryStandbyHibernateCheckbox);
@@ -346,9 +348,11 @@ public sealed class MainForm : Form
         var reapplyRemoteWakeButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyRemoteWakeButton.Click += (_, _) =>
         {
-            ApplyCustomRemoteEntriesFromUi();
-            _controller.ReapplyKnownRemoteWakePolicy();
-            SyncUiFromController();
+            if (!ApplyUiSettingsIfChanged())
+            {
+                _controller.ReapplyKnownRemoteWakePolicy();
+                SyncUiFromController();
+            }
         };
         var suggestRemoteWakeButton = new Button { Text = "自动建议", AutoSize = true };
         suggestRemoteWakeButton.Click += (_, _) => SuggestCustomRemoteWakeEntries();
@@ -387,9 +391,11 @@ public sealed class MainForm : Form
         var reapplyAllButton = new Button { Text = "重新应用全部设置", AutoSize = true };
         reapplyAllButton.Click += (_, _) =>
         {
-            ApplyUiSettingsImmediately();
-            _controller.ReapplyAllManagedSettings();
-            SyncUiFromController(includeDiagnostics: false);
+            if (!ApplyUiSettingsIfChanged())
+            {
+                _controller.ReapplyAllManagedSettings();
+                SyncUiFromController(includeDiagnostics: false);
+            }
         };
         var sleepButton = new Button { Text = "立即睡眠", AutoSize = true };
         sleepButton.Click += (_, _) => _controller.SleepNow();
@@ -505,9 +511,21 @@ public sealed class MainForm : Form
             return;
         }
 
+        ApplyUiSettingsIfChanged();
+    }
+
+    private bool ApplyUiSettingsIfChanged()
+    {
+        var currentSettings = _controller.CurrentSettings;
         var settings = CreateSettingsFromUi();
+        if (!HaveInteractiveSettingsChanged(currentSettings, settings))
+        {
+            return false;
+        }
+
         _controller.UpdateSettings(settings);
         SyncUiFromController(includeDiagnostics: false);
+        return true;
     }
 
     private void ApplyCustomRemoteEntriesFromUi()
@@ -561,6 +579,24 @@ public sealed class MainForm : Form
         settings.StartMinimized = _startMinimizedCheckbox.Checked;
         settings.StartWithWindows = _autostartCheckbox.Checked;
         return settings;
+    }
+
+    private static bool HaveInteractiveSettingsChanged(AppSettings currentSettings, AppSettings updatedSettings)
+    {
+        return currentSettings.PolicyMode != updatedSettings.PolicyMode
+            || currentSettings.ResumeProtectionEnabled != updatedSettings.ResumeProtectionEnabled
+            || currentSettings.ResumeProtectionMode != updatedSettings.ResumeProtectionMode
+            || currentSettings.ResumeProtectionOnlyForUnattendedWake != updatedSettings.ResumeProtectionOnlyForUnattendedWake
+            || currentSettings.ResumeProtectionDelaySeconds != updatedSettings.ResumeProtectionDelaySeconds
+            || currentSettings.DisableWakeTimers != updatedSettings.DisableWakeTimers
+            || currentSettings.DisableStandbyConnectivity != updatedSettings.DisableStandbyConnectivity
+            || currentSettings.DisableWiFiDirectAdapters != updatedSettings.DisableWiFiDirectAdapters
+            || currentSettings.EnforceBatteryStandbyHibernate != updatedSettings.EnforceBatteryStandbyHibernate
+            || currentSettings.BatteryStandbyHibernateTimeoutSeconds != updatedSettings.BatteryStandbyHibernateTimeoutSeconds
+            || currentSettings.BlockKnownRemoteWakeRequests != updatedSettings.BlockKnownRemoteWakeRequests
+            || !currentSettings.CustomRemoteWakeEntries.SequenceEqual(updatedSettings.CustomRemoteWakeEntries, StringComparer.OrdinalIgnoreCase)
+            || currentSettings.StartMinimized != updatedSettings.StartMinimized
+            || currentSettings.StartWithWindows != updatedSettings.StartWithWindows;
     }
 
     private void ApplySettingsToUi(AppSettings settings)

@@ -192,6 +192,7 @@ public sealed class PowerController : IDisposable
         ApplyPolicy(_settings.PolicyMode);
         if (_settings.DisableWakeTimers)
         {
+            CaptureWakeTimerRestoreSnapshotIfNeeded();
             ApplyWakeTimerPolicy();
         }
         else
@@ -200,6 +201,7 @@ public sealed class PowerController : IDisposable
         }
         if (_settings.DisableStandbyConnectivity)
         {
+            CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
             ApplyStandbyConnectivityPolicy();
         }
         else
@@ -208,6 +210,7 @@ public sealed class PowerController : IDisposable
         }
         if (_settings.DisableWiFiDirectAdapters)
         {
+            CaptureWiFiDirectAdapterRestoreSnapshotIfNeeded();
             ApplyWiFiDirectAdapterPolicy();
         }
         else
@@ -225,6 +228,7 @@ public sealed class PowerController : IDisposable
         }
         if (_settings.BlockKnownRemoteWakeRequests)
         {
+            CaptureKnownRemoteWakeRestoreSnapshotIfNeeded();
             ApplyKnownRemoteWakePolicy();
         }
         else
