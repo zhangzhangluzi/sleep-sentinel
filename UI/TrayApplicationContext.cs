@@ -309,20 +309,21 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void RefreshTrayText()
     {
+        var settings = _controller.CurrentSettings;
         var text = $"SleepSentinel - {_controller.CurrentStatus}";
         _notifyIcon.Text = text.Length > 63 ? text[..63] : text;
         _notifyIcon.BalloonTipTitle = "SleepSentinel";
         _notifyIcon.BalloonTipText = _controller.StartupWarmupCompleted
             ? _controller.CurrentRiskSummary
             : "SleepSentinel 已启动，详细状态会在后台补全。";
-        _followPowerPlanMenuItem.Checked = _controller.CurrentSettings.PolicyMode == PowerPolicyMode.FollowPowerPlan;
-        _keepAwakeMenuItem.Checked = _controller.CurrentSettings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely;
-        _wakeTimersMenuItem.Checked = _controller.CurrentSettings.DisableWakeTimers;
-        _standbyConnectivityMenuItem.Checked = _controller.CurrentSettings.DisableStandbyConnectivity;
-        _batteryFallbackMenuItem.Checked = _controller.CurrentSettings.EnforceBatteryStandbyHibernate;
-        _remoteWakeMenuItem.Checked = _controller.CurrentSettings.BlockKnownRemoteWakeRequests;
-        _startMinimizedMenuItem.Checked = _controller.CurrentSettings.StartMinimized;
-        _autostartMenuItem.Checked = _controller.CurrentSettings.StartWithWindows;
+        _followPowerPlanMenuItem.Checked = settings.PolicyMode == PowerPolicyMode.FollowPowerPlan;
+        _keepAwakeMenuItem.Checked = settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely;
+        _wakeTimersMenuItem.Checked = settings.DisableWakeTimers;
+        _standbyConnectivityMenuItem.Checked = settings.DisableStandbyConnectivity;
+        _batteryFallbackMenuItem.Checked = settings.EnforceBatteryStandbyHibernate;
+        _remoteWakeMenuItem.Checked = settings.BlockKnownRemoteWakeRequests;
+        _startMinimizedMenuItem.Checked = settings.StartMinimized;
+        _autostartMenuItem.Checked = settings.StartWithWindows;
     }
 
     private void RefreshTrayTextOnUiThread()
