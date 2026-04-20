@@ -505,8 +505,17 @@ public sealed class MainForm : Form
             return;
         }
 
+        var currentSettings = _controller.CurrentSettings;
         var settings = CreateSettingsFromUi();
-        _controller.UpdateSettings(settings);
+        if (HasOnlyPolicyModeChanged(currentSettings, settings))
+        {
+            _controller.SetPolicyMode(settings.PolicyMode);
+        }
+        else
+        {
+            _controller.UpdateSettings(settings);
+        }
+
         SyncUiFromController(includeDiagnostics: false);
     }
 
@@ -561,6 +570,28 @@ public sealed class MainForm : Form
         settings.StartMinimized = _startMinimizedCheckbox.Checked;
         settings.StartWithWindows = _autostartCheckbox.Checked;
         return settings;
+    }
+
+    private static bool HasOnlyPolicyModeChanged(AppSettings currentSettings, AppSettings updatedSettings)
+    {
+        if (currentSettings.PolicyMode == updatedSettings.PolicyMode)
+        {
+            return false;
+        }
+
+        return currentSettings.ResumeProtectionEnabled == updatedSettings.ResumeProtectionEnabled
+            && currentSettings.ResumeProtectionMode == updatedSettings.ResumeProtectionMode
+            && currentSettings.ResumeProtectionOnlyForUnattendedWake == updatedSettings.ResumeProtectionOnlyForUnattendedWake
+            && currentSettings.ResumeProtectionDelaySeconds == updatedSettings.ResumeProtectionDelaySeconds
+            && currentSettings.DisableWakeTimers == updatedSettings.DisableWakeTimers
+            && currentSettings.DisableStandbyConnectivity == updatedSettings.DisableStandbyConnectivity
+            && currentSettings.DisableWiFiDirectAdapters == updatedSettings.DisableWiFiDirectAdapters
+            && currentSettings.EnforceBatteryStandbyHibernate == updatedSettings.EnforceBatteryStandbyHibernate
+            && currentSettings.BatteryStandbyHibernateTimeoutSeconds == updatedSettings.BatteryStandbyHibernateTimeoutSeconds
+            && currentSettings.BlockKnownRemoteWakeRequests == updatedSettings.BlockKnownRemoteWakeRequests
+            && currentSettings.CustomRemoteWakeEntries.SequenceEqual(updatedSettings.CustomRemoteWakeEntries, StringComparer.OrdinalIgnoreCase)
+            && currentSettings.StartMinimized == updatedSettings.StartMinimized
+            && currentSettings.StartWithWindows == updatedSettings.StartWithWindows;
     }
 
     private void ApplySettingsToUi(AppSettings settings)

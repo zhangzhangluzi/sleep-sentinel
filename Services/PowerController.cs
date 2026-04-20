@@ -379,9 +379,15 @@ public sealed class PowerController : IDisposable
                 return;
             }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.PolicyMode = mode;
-            UpdateSettings(updatedSettings);
+            CancelPendingResumeProtection();
+            CancelPendingResumeEvaluation();
+            _settings.PolicyMode = mode;
+            EnsureSettingsDefaults();
+            SaveSettingsSnapshot();
+            ApplyPolicy(_settings.PolicyMode);
+            InvalidateStatusSnapshot();
+            _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}。");
+            StateChanged?.Invoke(this, EventArgs.Empty);
         }
     }
 
@@ -490,6 +496,7 @@ public sealed class PowerController : IDisposable
             }
             EnsureAutostartMatchesSettings();
             SaveSettingsSnapshot();
+            InvalidateStatusSnapshot();
             _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，Wi-Fi Direct 禁用={_settings.DisableWiFiDirectAdapters}，电池兜底休眠={_settings.EnforceBatteryStandbyHibernate}（{DescribePowerSettingDuration(GetBatteryStandbyHibernateTimeoutSeconds())}），远控拦截={_settings.BlockKnownRemoteWakeRequests}，自定义远控={_settings.CustomRemoteWakeEntries.Count} 条。");
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
