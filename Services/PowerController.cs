@@ -379,15 +379,7 @@ public sealed class PowerController : IDisposable
                 return;
             }
 
-            CancelPendingResumeProtection();
-            CancelPendingResumeEvaluation();
-            _settings.PolicyMode = mode;
-            EnsureSettingsDefaults();
-            SaveSettingsSnapshot();
-            ApplyPolicy(_settings.PolicyMode);
-            InvalidateStatusSnapshot();
-            _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}。");
-            StateChanged?.Invoke(this, EventArgs.Empty);
+            ApplyPolicyModeChangeOnly(mode);
         }
     }
 
@@ -395,10 +387,16 @@ public sealed class PowerController : IDisposable
     {
         lock (_stateSync)
         {
+            var previousSettings = _settings;
+            if (HasOnlyPolicyModeChanged(previousSettings, updatedSettings))
+            {
+                ApplyPolicyModeChangeOnly(updatedSettings.PolicyMode);
+                return;
+            }
+
             InvalidateStatusSnapshot();
             CancelPendingResumeProtection();
             CancelPendingResumeEvaluation();
-            var previousSettings = _settings;
             var previousManagedRemoteEntries = RemoteWakeBlockCatalog.GetManagedEntries(previousSettings.CustomRemoteWakeEntries);
             _settings = updatedSettings;
             EnsureSettingsDefaults();
@@ -500,6 +498,41 @@ public sealed class PowerController : IDisposable
             _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，Wi-Fi Direct 禁用={_settings.DisableWiFiDirectAdapters}，电池兜底休眠={_settings.EnforceBatteryStandbyHibernate}（{DescribePowerSettingDuration(GetBatteryStandbyHibernateTimeoutSeconds())}），远控拦截={_settings.BlockKnownRemoteWakeRequests}，自定义远控={_settings.CustomRemoteWakeEntries.Count} 条。");
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
+    }
+
+    private void ApplyPolicyModeChangeOnly(PowerPolicyMode mode)
+    {
+        CancelPendingResumeProtection();
+        CancelPendingResumeEvaluation();
+        _settings.PolicyMode = mode;
+        EnsureSettingsDefaults();
+        SaveSettingsSnapshot();
+        ApplyPolicy(_settings.PolicyMode);
+        InvalidateStatusSnapshot();
+        _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}。");
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static bool HasOnlyPolicyModeChanged(AppSettings previousSettings, AppSettings updatedSettings)
+    {
+        if (previousSettings.PolicyMode == updatedSettings.PolicyMode)
+        {
+            return false;
+        }
+
+        return previousSettings.ResumeProtectionEnabled == updatedSettings.ResumeProtectionEnabled
+            && previousSettings.ResumeProtectionMode == updatedSettings.ResumeProtectionMode
+            && previousSettings.ResumeProtectionOnlyForUnattendedWake == updatedSettings.ResumeProtectionOnlyForUnattendedWake
+            && previousSettings.ResumeProtectionDelaySeconds == updatedSettings.ResumeProtectionDelaySeconds
+            && previousSettings.DisableWakeTimers == updatedSettings.DisableWakeTimers
+            && previousSettings.DisableStandbyConnectivity == updatedSettings.DisableStandbyConnectivity
+            && previousSettings.DisableWiFiDirectAdapters == updatedSettings.DisableWiFiDirectAdapters
+            && previousSettings.EnforceBatteryStandbyHibernate == updatedSettings.EnforceBatteryStandbyHibernate
+            && previousSettings.BatteryStandbyHibernateTimeoutSeconds == updatedSettings.BatteryStandbyHibernateTimeoutSeconds
+            && previousSettings.BlockKnownRemoteWakeRequests == updatedSettings.BlockKnownRemoteWakeRequests
+            && previousSettings.CustomRemoteWakeEntries.SequenceEqual(updatedSettings.CustomRemoteWakeEntries, StringComparer.OrdinalIgnoreCase)
+            && previousSettings.StartMinimized == updatedSettings.StartMinimized
+            && previousSettings.StartWithWindows == updatedSettings.StartWithWindows;
     }
 
     public void SleepNow()
