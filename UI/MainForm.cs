@@ -41,6 +41,8 @@ public sealed class MainForm : Form
     private readonly TextBox _logTextBox;
     private readonly EventHandler _stateChangedHandler;
     private readonly Icon _appIcon;
+    private bool _diagnosticsRefreshInProgress;
+    private bool _diagnosticExportInProgress;
     private bool _suppressInteractiveToggleEvents;
     private bool _refreshPendingWhileHidden;
     private bool _logsDirtyWhileHidden;
@@ -396,9 +398,9 @@ public sealed class MainForm : Form
         var refreshLogButton = new Button { Text = "刷新日志", AutoSize = true };
         refreshLogButton.Click += (_, _) => LoadLogs();
         var diagnosticsButton = new Button { Text = "记录唤醒诊断", AutoSize = true };
-        diagnosticsButton.Click += (_, _) => RefreshDiagnostics(logSnapshot: true);
+        diagnosticsButton.Click += async (_, _) => await RefreshDiagnosticsAsync(logSnapshot: true);
         var exportReportButton = new Button { Text = "导出诊断报告", AutoSize = true };
-        exportReportButton.Click += (_, _) => ExportDiagnosticReport();
+        exportReportButton.Click += async (_, _) => await ExportDiagnosticReportAsync();
 
         actionsFlow.Controls.Add(reapplyAllButton);
         actionsFlow.Controls.Add(sleepButton);
@@ -727,12 +729,31 @@ public sealed class MainForm : Form
         _logTextBox.AppendText(line + Environment.NewLine);
     }
 
-    private void RefreshDiagnostics(bool logSnapshot)
+    private async Task RefreshDiagnosticsAsync(bool logSnapshot)
     {
+        if (_diagnosticsRefreshInProgress)
+        {
+            return;
+        }
+
+        _diagnosticsRefreshInProgress = true;
+        UseWaitCursor = true;
+
         try
         {
-            var snapshot = _controller.CollectWakeDiagnosticSnapshot(includePowerRequests: true, includeSleepStudy: true);
-            var text = _controller.FormatWakeDiagnosticSnapshot(snapshot, includePowerRequests: true, includeSleepStudy: true);
+            var result = await Task.Run(() =>
+            {
+                var snapshot = _controller.CollectWakeDiagnosticSnapshot(includePowerRequests: true, includeSleepStudy: true);
+                var text = _controller.FormatWakeDiagnosticSnapshot(snapshot, includePowerRequests: true, includeSleepStudy: true);
+                return (Snapshot: snapshot, Text: text);
+            });
+
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            var text = result.Text;
             _diagnosticsTextBox.Text = text;
 
             if (logSnapshot)
@@ -748,13 +769,34 @@ public sealed class MainForm : Form
             _logger.Error($"刷新诊断失败：{ex.Message}");
             MessageBox.Show($"刷新诊断失败：{ex.Message}", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+        finally
+        {
+            _diagnosticsRefreshInProgress = false;
+            if (!IsDisposed)
+            {
+                UseWaitCursor = false;
+            }
+        }
     }
 
-    private void ExportDiagnosticReport()
+    private async Task ExportDiagnosticReportAsync()
     {
+        if (_diagnosticExportInProgress)
+        {
+            return;
+        }
+
+        _diagnosticExportInProgress = true;
+        UseWaitCursor = true;
+
         try
         {
-            var path = _diagnosticReportService.Export();
+            var path = await Task.Run(() => _diagnosticReportService.Export());
+            if (IsDisposed)
+            {
+                return;
+            }
+
             RefreshStatusAndDetails();
             MessageBox.Show($"诊断报告已导出：\n{path}", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
@@ -762,6 +804,14 @@ public sealed class MainForm : Form
         {
             _logger.Error($"导出诊断报告失败：{ex.Message}");
             MessageBox.Show($"导出失败：{ex.Message}", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _diagnosticExportInProgress = false;
+            if (!IsDisposed)
+            {
+                UseWaitCursor = false;
+            }
         }
     }
 
@@ -807,7 +857,7 @@ public sealed class MainForm : Form
 
         if (includeDiagnostics)
         {
-            RefreshDiagnostics(logSnapshot: false);
+            _ = RefreshDiagnosticsAsync(logSnapshot: false);
         }
     }
 

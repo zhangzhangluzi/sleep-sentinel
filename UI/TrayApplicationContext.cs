@@ -147,19 +147,20 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("记录唤醒诊断", null, (_, _) =>
         {
-            RunTrayAction("记录唤醒诊断", () =>
+            RunTrayActionInBackground("记录唤醒诊断", () =>
             {
                 var diagnostics = _controller.CollectFullWakeDiagnosticsText();
                 _logger.Warn("用户从托盘菜单手动收集唤醒诊断。");
                 _logger.Warn(diagnostics);
+                PostToUi(() => ShowTrayBalloon("唤醒诊断已写入日志。", ToolTipIcon.Info));
             });
         });
         menu.Items.Add("导出诊断报告", null, (_, _) =>
         {
-            RunTrayAction("导出诊断报告", () =>
+            RunTrayActionInBackground("导出诊断报告", () =>
             {
                 var path = _diagnosticReportService.Export();
-                ShowTrayBalloon($"诊断报告已导出：{path}", ToolTipIcon.Info);
+                PostToUi(() => ShowTrayBalloon($"诊断报告已导出：{path}", ToolTipIcon.Info));
             });
         });
         menu.Items.Add("重新应用全部设置", null, (_, _) => RunTrayAction("重新应用全部设置", () => _controller.ReapplyAllManagedSettings()));
@@ -371,6 +372,38 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             _logger.Error($"托盘操作失败（{actionName}）：{ex.Message}");
             ShowTrayBalloon($"{actionName}失败：{ex.Message}", ToolTipIcon.Error);
+        }
+    }
+
+    private void RunTrayActionInBackground(string actionName, Action action)
+    {
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                _logger.Error($"托盘后台操作失败（{actionName}）：{ex.Message}");
+                PostToUi(() => ShowTrayBalloon($"{actionName}失败：{ex.Message}", ToolTipIcon.Error));
+            }
+        });
+    }
+
+    private void PostToUi(Action action)
+    {
+        if (_isExiting || !_uiInvoker.IsHandleCreated)
+        {
+            return;
+        }
+
+        try
+        {
+            _uiInvoker.BeginInvoke(action);
+        }
+        catch (InvalidOperationException)
+        {
         }
     }
 
