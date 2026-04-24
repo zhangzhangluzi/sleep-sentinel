@@ -215,16 +215,14 @@ public static class AutostartManager
     {
         const string script = """
             $ProgressPreference = 'SilentlyContinue'
-            $task = Get-ScheduledTask -TaskName 'SleepSentinel Elevated Autostart' -ErrorAction SilentlyContinue
-            if ($null -eq $task) {
-                return
+            $task = @(Get-ScheduledTask -TaskName 'SleepSentinel Elevated Autostart' -ErrorAction SilentlyContinue) | Select-Object -First 1
+            if ($null -ne $task) {
+                $action = $task.Actions | Select-Object -First 1
+                $execute = if ($null -ne $action) { [string]$action.Execute } else { '' }
+                $arguments = if ($null -ne $action) { [string]$action.Arguments } else { '' }
+                $runLevel = [string]$task.Principal.RunLevel
+                "{0}`t{1}`t{2}" -f $runLevel, $execute, $arguments
             }
-
-            $action = $task.Actions | Select-Object -First 1
-            $execute = if ($null -ne $action) { [string]$action.Execute } else { '' }
-            $arguments = if ($null -ne $action) { [string]$action.Arguments } else { '' }
-            $runLevel = [string]$task.Principal.RunLevel
-            "{0}`t{1}`t{2}" -f $runLevel, $execute, $arguments
             """;
 
         var output = RunPowerShellScript(script);
