@@ -237,7 +237,7 @@ public static class AutostartManager
         }
 
         var parts = output.Split('\t');
-        if (parts.Length < 3)
+        if (parts.Length < 2)
         {
             return new ScheduledTaskInfo(false, false, string.Empty, $"计划任务输出无法识别：{output}");
         }
