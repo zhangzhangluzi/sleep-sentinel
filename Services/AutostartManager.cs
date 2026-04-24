@@ -259,7 +259,7 @@ public static class AutostartManager
 $ErrorActionPreference = 'Stop'
 $action = New-ScheduledTaskAction -Execute '{executablePath}'
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User '{userId}'
-$principal = New-ScheduledTaskPrincipal -UserId '{userId}' -LogonType InteractiveToken -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId '{userId}' -LogonType Interactive -RunLevel Highest
 Register-ScheduledTask -TaskName '{ElevatedTaskName}' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
 ";
         var output = RunPowerShellScript(script);
