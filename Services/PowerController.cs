@@ -700,7 +700,7 @@ public sealed class PowerController : IDisposable
                 || !TryRunDeferredStartupRefresh(static controller => controller.RefreshWiFiDirectAdapterPolicySummary(persistSnapshot: false))
                 || !TryRunDeferredStartupRefresh(static controller => controller.RefreshBatteryStandbyHibernatePolicySummary(persistSnapshot: false))
                 || !TryRunDeferredStartupRefresh(static controller => controller.RefreshKnownRemoteWakePolicySummary(persistSnapshot: false))
-                || !TryRunDeferredStartupRefresh(static controller => controller.RefreshAutostartPolicySummary()))
+                || !TryRunDeferredStartupRefresh(static controller => controller.EnsureAutostartMatchesSettings()))
             {
                 return;
             }
