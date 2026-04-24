@@ -247,7 +247,7 @@ public sealed class WakeDiagnosticsService
 
     private string CollectSleepStudySummary()
     {
-        var outputPath = Path.Combine(Path.GetTempPath(), $"sleepstudy-{DateTime.Now:yyyyMMdd-HHmmss}.xml");
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sleepstudy-{DateTime.Now:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid():N}.xml");
         var result = _powerCfg.Run($"/sleepstudy /duration 1 /xml /output \"{outputPath}\"", SleepStudyTimeoutMilliseconds);
         if (!File.Exists(outputPath))
         {

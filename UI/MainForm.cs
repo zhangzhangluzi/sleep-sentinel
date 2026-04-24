@@ -9,6 +9,8 @@ public sealed class MainForm : Form
     private const int MinimumWindowHeight = 760;
     private const int PreferredWindowWidth = 1800;
     private const int PreferredWindowHeight = 1180;
+    private const int MaxVisibleLogLines = 400;
+    private const int MaxVisibleLogCharacters = 120000;
     private readonly PowerController _controller;
     private readonly FileLogger _logger;
     private readonly SettingsStore _settingsStore;
@@ -725,7 +727,7 @@ public sealed class MainForm : Form
 
     private void LoadLogs()
     {
-        _logTextBox.Lines = _logger.ReadRecent().ToArray();
+        _logTextBox.Lines = _logger.ReadRecent(MaxVisibleLogLines).ToArray();
         _logTextBox.SelectionStart = _logTextBox.TextLength;
         _logTextBox.ScrollToCaret();
         _logsDirtyWhileHidden = false;
@@ -763,6 +765,24 @@ public sealed class MainForm : Form
         }
 
         _logTextBox.AppendText(line + Environment.NewLine);
+        TrimVisibleLogsIfNeeded();
+    }
+
+    private void TrimVisibleLogsIfNeeded()
+    {
+        if (_logTextBox.TextLength <= MaxVisibleLogCharacters)
+        {
+            return;
+        }
+
+        _logTextBox.Lines = _logTextBox.Lines.TakeLast(MaxVisibleLogLines).ToArray();
+        if (_logTextBox.TextLength > MaxVisibleLogCharacters)
+        {
+            _logTextBox.Text = _logTextBox.Text[^MaxVisibleLogCharacters..];
+        }
+
+        _logTextBox.SelectionStart = _logTextBox.TextLength;
+        _logTextBox.ScrollToCaret();
     }
 
     private async Task RefreshDiagnosticsAsync(bool logSnapshot)

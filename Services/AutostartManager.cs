@@ -73,7 +73,9 @@ public static class AutostartManager
                             : "检测到普通权限开机自启残留指向旧路径，建议重新应用切回最高权限任务"
                         : scheduledTask.Exists && !scheduledTask.MatchesExecutablePath
                             ? "检测到同名计划任务，但目标程序不是当前版本，建议重新应用开机自启"
-                            : "开机自启尚未配置为最高权限启动");
+                            : scheduledTask.Exists
+                                ? "检测到同名计划任务，但未以最高权限运行，建议重新应用开机自启"
+                                : "开机自启尚未配置为最高权限启动");
         }
 
         var desiredRunKeyOnly = runKeyStatus.MatchesExecutablePath && !scheduledTask.Exists;
@@ -94,8 +96,7 @@ public static class AutostartManager
     public static AutostartStatus EnsureConfigured(bool enabled, bool requireElevated)
     {
         var current = QueryStatus(enabled, requireElevated);
-        ThrowIfVerificationFailed(current);
-        if (current.MatchesDesiredConfiguration)
+        if (!current.VerificationFailed && current.MatchesDesiredConfiguration)
         {
             return current;
         }

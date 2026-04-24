@@ -21,7 +21,7 @@ public sealed class DiagnosticReportService
         Directory.CreateDirectory(reportsDirectory);
 
         var timestamp = DateTime.Now;
-        var reportPath = Path.Combine(reportsDirectory, $"diagnostic-report-{timestamp:yyyyMMdd-HHmmss}.txt");
+        var reportPath = Path.Combine(reportsDirectory, $"diagnostic-report-{timestamp:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid():N}.txt");
         var tempPath = reportPath + ".tmp";
         var settings = _controller.CurrentSettings;
         var recentLogs = _logger.ReadRecent(400);

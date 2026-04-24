@@ -46,7 +46,7 @@ public sealed class FileLogger
                     break;
                 }
 
-                var lines = File.ReadAllLines(path).TakeLast(remainingLines).ToArray();
+                var lines = File.ReadLines(path).TakeLast(remainingLines).ToArray();
                 if (lines.Length == 0)
                 {
                     continue;
