@@ -38,24 +38,25 @@ public static class AutostartManager
             && scheduledTask.MatchesExecutablePath
             && scheduledTask.RunLevel.Equals("Highest", StringComparison.OrdinalIgnoreCase);
 
-        var actualMode = elevatedTaskEnabled
+        var actualMode = scheduledTask.Exists
             ? AutostartMode.ElevatedScheduledTask
             : runKeyStatus.Exists
                 ? AutostartMode.RunKey
                 : AutostartMode.Disabled;
-        var hasConflict = runKeyStatus.Exists && elevatedTaskEnabled;
 
         if (!enabled)
         {
-            var matchesDesired = actualMode == AutostartMode.Disabled && !hasConflict;
+            var matchesDesired = !runKeyStatus.Exists && !scheduledTask.Exists;
             return new AutostartStatus(
                 actualMode,
                 matchesDesired,
                 matchesDesired
                     ? "开机自启未启用"
-                    : runKeyStatus.Exists
-                        ? "开机自启存在普通权限残留配置，建议重新应用"
-                        : "开机自启存在残留配置，建议重新应用");
+                    : runKeyStatus.Exists && scheduledTask.Exists
+                        ? "开机自启存在普通权限和计划任务残留配置，建议重新应用"
+                        : runKeyStatus.Exists
+                            ? "开机自启存在普通权限残留配置，建议重新应用"
+                            : "开机自启存在计划任务残留配置，建议重新应用");
         }
 
         if (requireElevated)
@@ -75,7 +76,7 @@ public static class AutostartManager
                             : "开机自启尚未配置为最高权限启动");
         }
 
-        var desiredRunKeyOnly = runKeyStatus.MatchesExecutablePath && !elevatedTaskEnabled;
+        var desiredRunKeyOnly = runKeyStatus.MatchesExecutablePath && !scheduledTask.Exists;
         return new AutostartStatus(
             actualMode,
             desiredRunKeyOnly,
@@ -83,9 +84,11 @@ public static class AutostartManager
                 ? "开机自启将按当前用户普通权限运行"
                 : elevatedTaskEnabled
                     ? "开机自启当前仍是最高权限计划任务，建议重新应用切回普通模式"
-                    : runKeyStatus.Exists
-                        ? "检测到普通权限开机自启残留指向旧路径，建议重新应用"
-                    : "开机自启尚未配置");
+                    : scheduledTask.Exists
+                        ? "检测到开机自启计划任务残留，建议重新应用切回普通模式"
+                        : runKeyStatus.Exists
+                            ? "检测到普通权限开机自启残留指向旧路径，建议重新应用"
+                            : "开机自启尚未配置");
     }
 
     public static AutostartStatus EnsureConfigured(bool enabled, bool requireElevated)
