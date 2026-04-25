@@ -27,9 +27,11 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _standbyConnectivityMenuItem;
     private readonly ToolStripMenuItem _batteryFallbackMenuItem;
     private readonly ToolStripMenuItem _remoteWakeMenuItem;
+    private readonly ToolStripMenuItem _rayLinkProcessStormMenuItem;
     private readonly ToolStripMenuItem _startMinimizedMenuItem;
     private readonly ToolStripMenuItem _autostartMenuItem;
     private readonly EventHandler _stateChangedHandler;
+    private readonly EventHandler<string> _notificationRequestedHandler;
     private int _deferredWarmupScheduled;
     private bool _isExiting;
 
@@ -134,6 +136,16 @@ public sealed class TrayApplicationContext : ApplicationContext
         };
         menu.Items.Add(_remoteWakeMenuItem);
 
+        _rayLinkProcessStormMenuItem = new ToolStripMenuItem("RayLink 进程风暴守护");
+        _rayLinkProcessStormMenuItem.Click += (_, _) =>
+        {
+            RunTrayAction("切换 RayLink 进程风暴守护", () =>
+            {
+                ToggleSetting(static settings => settings.MonitorRayLinkProcessStorm = !settings.MonitorRayLinkProcessStorm);
+            });
+        };
+        menu.Items.Add(_rayLinkProcessStormMenuItem);
+
         menu.Items.Add(new ToolStripSeparator());
 
         _startMinimizedMenuItem = new ToolStripMenuItem("启动后仅驻留托盘");
@@ -182,6 +194,11 @@ public sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.DoubleClick += (_, _) => ShowMainForm();
         _stateChangedHandler = (_, _) => RefreshTrayTextOnUiThread();
         _controller.StateChanged += _stateChangedHandler;
+        _notificationRequestedHandler = (_, message) =>
+        {
+            PostToUi(() => ShowTrayBalloon(message, ToolTipIcon.Warning));
+        };
+        _controller.UserNotificationRequested += _notificationRequestedHandler;
         _activationWaitHandle = ThreadPool.RegisterWaitForSingleObject(
             _activationSignal,
             static (state, _) => ((TrayApplicationContext)state!).OnExternalActivationRequested(),
@@ -211,6 +228,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         _isExiting = true;
         _controller.StateChanged -= _stateChangedHandler;
+        _controller.UserNotificationRequested -= _notificationRequestedHandler;
         _activationWaitHandle.Unregister(null);
         _takeoverWaitHandle.Unregister(null);
         _deferredWarmupTimer.Dispose();
@@ -323,6 +341,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _standbyConnectivityMenuItem.Checked = settings.DisableStandbyConnectivity;
         _batteryFallbackMenuItem.Checked = settings.EnforceBatteryStandbyHibernate;
         _remoteWakeMenuItem.Checked = settings.BlockKnownRemoteWakeRequests;
+        _rayLinkProcessStormMenuItem.Checked = settings.MonitorRayLinkProcessStorm;
         _startMinimizedMenuItem.Checked = settings.StartMinimized;
         _autostartMenuItem.Checked = settings.StartWithWindows;
     }

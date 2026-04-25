@@ -28,6 +28,8 @@ public sealed class MainForm : Form
     private readonly CheckBox _enforceBatteryStandbyHibernateCheckbox;
     private readonly NumericUpDown _batteryStandbyHibernateTimeoutInput;
     private readonly CheckBox _blockKnownRemoteWakeCheckbox;
+    private readonly CheckBox _monitorRayLinkProcessStormCheckbox;
+    private readonly CheckBox _autoContainRayLinkProcessStormCheckbox;
     private readonly TextBox _customRemoteWakeTextBox;
     private readonly CheckBox _startMinimizedCheckbox;
     private readonly CheckBox _autostartCheckbox;
@@ -37,6 +39,7 @@ public sealed class MainForm : Form
     private readonly Label _wifiDirectQuickStateLabel;
     private readonly Label _batteryStandbyHibernateQuickStateLabel;
     private readonly Label _remoteWakeQuickStateLabel;
+    private readonly Label _rayLinkProcessStormQuickStateLabel;
     private readonly Label _customRemoteWakeHintLabel;
     private readonly TextBox _detailsTextBox;
     private readonly TextBox _diagnosticsTextBox;
@@ -259,6 +262,20 @@ public sealed class MainForm : Form
             SyncUiFromController();
         };
 
+        _monitorRayLinkProcessStormCheckbox = new CheckBox
+        {
+            AutoSize = true,
+            Text = "监控 RayLink 进程风暴（正常使用不处理）"
+        };
+        _monitorRayLinkProcessStormCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
+
+        _autoContainRayLinkProcessStormCheckbox = new CheckBox
+        {
+            AutoSize = true,
+            Text = "命中风暴时自动止血（停止服务并结束 RayLink 进程树，不禁用服务）"
+        };
+        _autoContainRayLinkProcessStormCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
+
         _customRemoteWakeTextBox = new TextBox
         {
             Multiline = true,
@@ -365,6 +382,13 @@ public sealed class MainForm : Form
         remoteWakeActions.Controls.Add(_remoteWakeQuickStateLabel);
         AddSettingRow(settingsPanel, 8, "远控拦截", remoteWakeActions);
 
+        var rayLinkProcessStormActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
+        _rayLinkProcessStormQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
+        rayLinkProcessStormActions.Controls.Add(_monitorRayLinkProcessStormCheckbox);
+        rayLinkProcessStormActions.Controls.Add(_autoContainRayLinkProcessStormCheckbox);
+        rayLinkProcessStormActions.Controls.Add(_rayLinkProcessStormQuickStateLabel);
+        AddSettingRow(settingsPanel, 9, "RayLink守护", rayLinkProcessStormActions);
+
         var customRemoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, FlowDirection = FlowDirection.TopDown };
         var customRemoteWakeToolbar = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
         var applyCustomRemoteWakeButton = new Button { Text = "应用名单", AutoSize = true };
@@ -374,12 +398,12 @@ public sealed class MainForm : Form
         customRemoteWakeToolbar.Controls.Add(_customRemoteWakeHintLabel);
         customRemoteWakeActions.Controls.Add(_customRemoteWakeTextBox);
         customRemoteWakeActions.Controls.Add(customRemoteWakeToolbar);
-        AddSettingRow(settingsPanel, 9, "自定义远控", customRemoteWakeActions);
+        AddSettingRow(settingsPanel, 10, "自定义远控", customRemoteWakeActions);
 
         var startupFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
         startupFlow.Controls.Add(_startMinimizedCheckbox);
         startupFlow.Controls.Add(_autostartCheckbox);
-        AddSettingRow(settingsPanel, 10, "启动行为", startupFlow);
+        AddSettingRow(settingsPanel, 11, "启动行为", startupFlow);
 
         root.Controls.Add(settingsPanel);
 
@@ -577,6 +601,8 @@ public sealed class MainForm : Form
         settings.EnforceBatteryStandbyHibernate = _enforceBatteryStandbyHibernateCheckbox.Checked;
         settings.BatteryStandbyHibernateTimeoutSeconds = checked((int)_batteryStandbyHibernateTimeoutInput.Value * 60);
         settings.BlockKnownRemoteWakeRequests = _blockKnownRemoteWakeCheckbox.Checked;
+        settings.MonitorRayLinkProcessStorm = _monitorRayLinkProcessStormCheckbox.Checked;
+        settings.AutoContainRayLinkProcessStorm = _autoContainRayLinkProcessStormCheckbox.Checked;
         settings.CustomRemoteWakeEntries = ParseCustomRemoteWakeEntries(_customRemoteWakeTextBox.Text).ToList();
         settings.StartMinimized = _startMinimizedCheckbox.Checked;
         settings.StartWithWindows = _autostartCheckbox.Checked;
@@ -596,6 +622,8 @@ public sealed class MainForm : Form
             || currentSettings.EnforceBatteryStandbyHibernate != updatedSettings.EnforceBatteryStandbyHibernate
             || currentSettings.BatteryStandbyHibernateTimeoutSeconds != updatedSettings.BatteryStandbyHibernateTimeoutSeconds
             || currentSettings.BlockKnownRemoteWakeRequests != updatedSettings.BlockKnownRemoteWakeRequests
+            || currentSettings.MonitorRayLinkProcessStorm != updatedSettings.MonitorRayLinkProcessStorm
+            || currentSettings.AutoContainRayLinkProcessStorm != updatedSettings.AutoContainRayLinkProcessStorm
             || !currentSettings.CustomRemoteWakeEntries.SequenceEqual(updatedSettings.CustomRemoteWakeEntries, StringComparer.OrdinalIgnoreCase)
             || currentSettings.StartMinimized != updatedSettings.StartMinimized
             || currentSettings.StartWithWindows != updatedSettings.StartWithWindows;
@@ -617,6 +645,8 @@ public sealed class MainForm : Form
             _batteryStandbyHibernateTimeoutInput.Value = Math.Clamp(settings.BatteryStandbyHibernateTimeoutSeconds / 60, 3, 240);
             _enforceBatteryStandbyHibernateCheckbox.Checked = settings.EnforceBatteryStandbyHibernate;
             _blockKnownRemoteWakeCheckbox.Checked = settings.BlockKnownRemoteWakeRequests;
+            _monitorRayLinkProcessStormCheckbox.Checked = settings.MonitorRayLinkProcessStorm;
+            _autoContainRayLinkProcessStormCheckbox.Checked = settings.AutoContainRayLinkProcessStorm;
             _customRemoteWakeTextBox.Text = string.Join(Environment.NewLine, settings.CustomRemoteWakeEntries);
             _startMinimizedCheckbox.Checked = settings.StartMinimized;
             _autostartCheckbox.Checked = settings.StartWithWindows;
@@ -632,6 +662,8 @@ public sealed class MainForm : Form
         _wifiDirectQuickStateLabel.Text = _controller.CurrentWiFiDirectQuickState;
         _batteryStandbyHibernateQuickStateLabel.Text = _controller.CurrentBatteryStandbyHibernateQuickState;
         _remoteWakeQuickStateLabel.Text = _controller.CurrentRemoteWakeQuickState;
+        _autoContainRayLinkProcessStormCheckbox.Enabled = settings.MonitorRayLinkProcessStorm;
+        _rayLinkProcessStormQuickStateLabel.Text = _controller.CurrentRayLinkProcessStormQuickState;
         _customRemoteWakeHintLabel.Text = settings.CustomRemoteWakeEntries.Count == 0
             ? "当前：未添加自定义条目"
             : $"当前：{settings.CustomRemoteWakeEntries.Count} 条自定义规则";
@@ -719,6 +751,7 @@ public sealed class MainForm : Form
             $"Wi-Fi Direct 策略：{settings.WiFiDirectAdapterPolicySummary}{Environment.NewLine}" +
             $"电池兜底策略：{settings.BatteryStandbyHibernatePolicySummary}{Environment.NewLine}" +
             $"远控拦截策略：{settings.KnownRemoteWakePolicySummary}{Environment.NewLine}" +
+            $"RayLink 风暴守护：{settings.RayLinkProcessStormPolicySummary}{Environment.NewLine}" +
             $"启动策略：{settings.AutostartPolicySummary}{Environment.NewLine}" +
             $"配置文件：{_settingsStore.SettingsPath}{Environment.NewLine}" +
             $"日志目录：{_logger.LogDirectory}{Environment.NewLine}" +

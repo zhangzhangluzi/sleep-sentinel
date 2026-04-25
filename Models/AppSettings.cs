@@ -11,6 +11,8 @@ public sealed class AppSettings
     public bool DisableWiFiDirectAdapters { get; set; }
     public bool EnforceBatteryStandbyHibernate { get; set; }
     public bool BlockKnownRemoteWakeRequests { get; set; }
+    public bool MonitorRayLinkProcessStorm { get; set; } = true;
+    public bool AutoContainRayLinkProcessStorm { get; set; } = true;
     public int BatteryStandbyHibernateTimeoutSeconds { get; set; } = 600;
     public Dictionary<string, PowerPlanRestoreSnapshot> PowerPlanRestoreSnapshots { get; set; } = [];
     public List<string> CustomRemoteWakeEntries { get; set; } = [];
@@ -46,6 +48,7 @@ public sealed class AppSettings
     public string WiFiDirectAdapterPolicySummary { get; set; } = "未检查";
     public string BatteryStandbyHibernatePolicySummary { get; set; } = "未检查";
     public string KnownRemoteWakePolicySummary { get; set; } = "未检查";
+    public string RayLinkProcessStormPolicySummary { get; set; } = "未检查";
     public string AutostartPolicySummary { get; set; } = "未检查";
 
     public AppSettings Clone()
@@ -61,6 +64,8 @@ public sealed class AppSettings
             DisableWiFiDirectAdapters = DisableWiFiDirectAdapters,
             EnforceBatteryStandbyHibernate = EnforceBatteryStandbyHibernate,
             BlockKnownRemoteWakeRequests = BlockKnownRemoteWakeRequests,
+            MonitorRayLinkProcessStorm = MonitorRayLinkProcessStorm,
+            AutoContainRayLinkProcessStorm = AutoContainRayLinkProcessStorm,
             BatteryStandbyHibernateTimeoutSeconds = BatteryStandbyHibernateTimeoutSeconds,
             PowerPlanRestoreSnapshots = PowerPlanRestoreSnapshots.ToDictionary(
                 static pair => pair.Key,
@@ -99,6 +104,7 @@ public sealed class AppSettings
             WiFiDirectAdapterPolicySummary = WiFiDirectAdapterPolicySummary,
             BatteryStandbyHibernatePolicySummary = BatteryStandbyHibernatePolicySummary,
             KnownRemoteWakePolicySummary = KnownRemoteWakePolicySummary,
+            RayLinkProcessStormPolicySummary = RayLinkProcessStormPolicySummary,
             AutostartPolicySummary = AutostartPolicySummary
         };
     }

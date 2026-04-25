@@ -130,6 +130,7 @@ public sealed class PowerController : IDisposable
     private readonly FileLogger _logger;
     private readonly PowerCfgService _powerCfg;
     private readonly WakeDiagnosticsService _wakeDiagnostics;
+    private readonly RayLinkProcessStormGuard _rayLinkProcessStormGuard;
     private readonly object _stateSync = new();
     private readonly object _manualSignalSync = new();
     private readonly object _resumeProtectionSync = new();
@@ -167,6 +168,9 @@ public sealed class PowerController : IDisposable
         _settings = settings;
         _powerCfg = new PowerCfgService(logger);
         _wakeDiagnostics = new WakeDiagnosticsService(_powerCfg, logger);
+        _rayLinkProcessStormGuard = new RayLinkProcessStormGuard(logger);
+        _rayLinkProcessStormGuard.StateChanged += OnRayLinkProcessStormStateChanged;
+        _rayLinkProcessStormGuard.NotificationRequested += OnRayLinkProcessStormNotificationRequested;
         EnsureSettingsDefaults();
         MigrateLegacyRestoreSnapshotsIfNeeded();
         _resumeTimer = new System.Threading.Timer(
@@ -235,6 +239,7 @@ public sealed class PowerController : IDisposable
         {
             _settings.KnownRemoteWakePolicySummary = "未由应用接管；启动时跳过即时核验";
         }
+        ApplyRayLinkProcessStormGuardSettings();
         _settings.AutostartPolicySummary = _settings.StartWithWindows
             ? "开机自启已启用；启动时跳过即时核验"
             : "开机自启未启用";
@@ -244,6 +249,8 @@ public sealed class PowerController : IDisposable
     }
 
     public event EventHandler? StateChanged;
+
+    public event EventHandler<string>? UserNotificationRequested;
 
     public AppSettings CurrentSettings => CloneCurrentSettings();
 
@@ -323,6 +330,8 @@ public sealed class PowerController : IDisposable
     public string CurrentBatteryStandbyHibernateQuickState => GetStatusSnapshot().BatteryStandbyHibernateQuickState;
 
     public string CurrentRemoteWakeQuickState => GetStatusSnapshot().RemoteWakeQuickState;
+
+    public string CurrentRayLinkProcessStormQuickState => _rayLinkProcessStormGuard.CurrentQuickState;
 
     public bool StartupWarmupCompleted
     {
@@ -496,10 +505,11 @@ public sealed class PowerController : IDisposable
             {
                 RefreshKnownRemoteWakePolicySummary(persistSnapshot: false);
             }
+            ApplyRayLinkProcessStormGuardSettings();
             EnsureAutostartMatchesSettings();
             SaveSettingsSnapshot();
             InvalidateStatusSnapshot();
-            _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，Wi-Fi Direct 禁用={_settings.DisableWiFiDirectAdapters}，电池兜底休眠={_settings.EnforceBatteryStandbyHibernate}（{DescribePowerSettingDuration(GetBatteryStandbyHibernateTimeoutSeconds())}），远控拦截={_settings.BlockKnownRemoteWakeRequests}，自定义远控={_settings.CustomRemoteWakeEntries.Count} 条。");
+            _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，Wi-Fi Direct 禁用={_settings.DisableWiFiDirectAdapters}，电池兜底休眠={_settings.EnforceBatteryStandbyHibernate}（{DescribePowerSettingDuration(GetBatteryStandbyHibernateTimeoutSeconds())}），远控拦截={_settings.BlockKnownRemoteWakeRequests}，RayLink风暴守护={_settings.MonitorRayLinkProcessStorm}/{_settings.AutoContainRayLinkProcessStorm}，自定义远控={_settings.CustomRemoteWakeEntries.Count} 条。");
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
     }
@@ -534,6 +544,8 @@ public sealed class PowerController : IDisposable
             && previousSettings.EnforceBatteryStandbyHibernate == updatedSettings.EnforceBatteryStandbyHibernate
             && previousSettings.BatteryStandbyHibernateTimeoutSeconds == updatedSettings.BatteryStandbyHibernateTimeoutSeconds
             && previousSettings.BlockKnownRemoteWakeRequests == updatedSettings.BlockKnownRemoteWakeRequests
+            && previousSettings.MonitorRayLinkProcessStorm == updatedSettings.MonitorRayLinkProcessStorm
+            && previousSettings.AutoContainRayLinkProcessStorm == updatedSettings.AutoContainRayLinkProcessStorm
             && previousSettings.CustomRemoteWakeEntries.SequenceEqual(updatedSettings.CustomRemoteWakeEntries, StringComparer.OrdinalIgnoreCase)
             && previousSettings.StartMinimized == updatedSettings.StartMinimized
             && previousSettings.StartWithWindows == updatedSettings.StartWithWindows;
@@ -670,6 +682,7 @@ public sealed class PowerController : IDisposable
                 RefreshKnownRemoteWakePolicySummary(persistSnapshot: false);
             }
 
+            ApplyRayLinkProcessStormGuardSettings();
             EnsureAutostartMatchesSettings();
             SaveSettingsSnapshot();
             _logger.Info("已重新应用当前全部设置。");
@@ -1037,6 +1050,9 @@ public sealed class PowerController : IDisposable
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
         SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        _rayLinkProcessStormGuard.StateChanged -= OnRayLinkProcessStormStateChanged;
+        _rayLinkProcessStormGuard.NotificationRequested -= OnRayLinkProcessStormNotificationRequested;
+        _rayLinkProcessStormGuard.Dispose();
         if (_powerNotificationWindow is not null)
         {
             _powerNotificationWindow.LidStateChanged -= OnLidStateChanged;
@@ -1857,6 +1873,36 @@ public sealed class PowerController : IDisposable
         _settings.AutostartPolicySummary = status.Summary;
     }
 
+    private void ApplyRayLinkProcessStormGuardSettings()
+    {
+        _rayLinkProcessStormGuard.UpdateSettings(
+            _settings.MonitorRayLinkProcessStorm,
+            _settings.AutoContainRayLinkProcessStorm);
+        _settings.RayLinkProcessStormPolicySummary = _rayLinkProcessStormGuard.CurrentSummary;
+    }
+
+    private void OnRayLinkProcessStormStateChanged(object? sender, EventArgs e)
+    {
+        lock (_stateSync)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _settings.RayLinkProcessStormPolicySummary = _rayLinkProcessStormGuard.CurrentSummary;
+            SaveSettingsSnapshot();
+            InvalidateStatusSnapshot();
+        }
+
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnRayLinkProcessStormNotificationRequested(object? sender, string message)
+    {
+        UserNotificationRequested?.Invoke(this, message);
+    }
+
     private bool RequiresElevatedAutostart()
     {
         return _settings.DisableWakeTimers
@@ -2501,6 +2547,7 @@ public sealed class PowerController : IDisposable
         _settings.WiFiDirectAdapterPolicySummary ??= "未检查";
         _settings.BatteryStandbyHibernatePolicySummary ??= "未检查";
         _settings.KnownRemoteWakePolicySummary ??= "未检查";
+        _settings.RayLinkProcessStormPolicySummary ??= "未检查";
         _settings.AutostartPolicySummary ??= "未检查";
     }
 
