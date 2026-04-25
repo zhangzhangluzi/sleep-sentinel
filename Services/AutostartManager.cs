@@ -112,6 +112,38 @@ public static class AutostartManager
         return verified;
     }
 
+    public static bool TryStartElevatedScheduledTaskForCurrentExecutable(out string failureMessage)
+    {
+        failureMessage = string.Empty;
+
+        var scheduledTask = QueryScheduledTask();
+        if (scheduledTask.QueryFailed)
+        {
+            failureMessage = scheduledTask.QueryError;
+            return false;
+        }
+
+        if (!scheduledTask.Exists
+            || !scheduledTask.MatchesExecutablePath
+            || !scheduledTask.RunLevel.Equals("Highest", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var script = $@"
+$ErrorActionPreference = 'Stop'
+Start-ScheduledTask -TaskName '{ElevatedTaskName}' | Out-Null
+";
+        var output = RunPowerShellScript(script);
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            return true;
+        }
+
+        failureMessage = output;
+        return false;
+    }
+
     private static AutostartStatus BuildScheduledTaskQueryFailureStatus(bool enabled, bool requireElevated, RunKeyStatus runKeyStatus, string queryError)
     {
         var actualMode = runKeyStatus.Exists ? AutostartMode.RunKey : AutostartMode.Disabled;

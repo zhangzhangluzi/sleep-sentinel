@@ -10,6 +10,7 @@ internal static class Program
     private const string ActivationEventName = @"Global\SleepSentinel.ActivateExisting";
     private const string TakeoverEventName = @"Global\SleepSentinel.TakeoverPrimary";
     private const int TakeoverWaitMilliseconds = 5000;
+    private const int ElevatedTaskBootstrapWaitMilliseconds = 8000;
     private const int TakeoverRetryIntervalMilliseconds = 250;
 
     [STAThread]
@@ -40,6 +41,12 @@ internal static class Program
         var singleInstance = TryCreatePrimaryInstanceMutex();
         if (singleInstance is not null)
         {
+            singleInstance = TrySwitchPrimaryRoleToElevatedTask(singleInstance);
+            if (singleInstance is null)
+            {
+                return null;
+            }
+
             return singleInstance;
         }
 
@@ -54,6 +61,24 @@ internal static class Program
 
         TryActivateExistingInstance(activationEvent);
         return null;
+    }
+
+    private static Mutex? TrySwitchPrimaryRoleToElevatedTask(Mutex singleInstance)
+    {
+        if (IsRunningElevated())
+        {
+            return singleInstance;
+        }
+
+        if (!AutostartManager.TryStartElevatedScheduledTaskForCurrentExecutable(out _))
+        {
+            return singleInstance;
+        }
+
+        singleInstance.Dispose();
+        return WaitForPrimaryInstanceToAppear()
+            ? null
+            : TryCreatePrimaryInstanceMutex();
     }
 
     private static Mutex? TryCreatePrimaryInstanceMutex()
@@ -82,6 +107,38 @@ internal static class Program
         }
 
         return null;
+    }
+
+    private static bool WaitForPrimaryInstanceToAppear()
+    {
+        var deadlineTick = Environment.TickCount64 + ElevatedTaskBootstrapWaitMilliseconds;
+        while (Environment.TickCount64 < deadlineTick)
+        {
+            Thread.Sleep(TakeoverRetryIntervalMilliseconds);
+            if (TryOpenPrimaryInstanceMutex())
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryOpenPrimaryInstanceMutex()
+    {
+        try
+        {
+            using var singleInstance = Mutex.OpenExisting(SingleInstanceMutexName);
+            return true;
+        }
+        catch (WaitHandleCannotBeOpenedException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
     }
 
     private static void TryActivateExistingInstance(EventWaitHandle activationEvent)
