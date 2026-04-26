@@ -22,7 +22,7 @@ SleepSentinel 是一个 Windows 托盘常驻工具，目标是解决两类场景
   - 设置电池供电下待机一段时间后自动转入休眠
 - 可选禁用 `Microsoft Wi-Fi Direct Virtual Adapter`
 - 可选拦截常见远程软件的 `DISPLAY / SYSTEM / AWAYMODE` 保持唤醒请求
-- 可选监控 RayLink 进程风暴，命中异常阈值时只做止血，不永久禁用 RayLink 服务
+- 可选监控 RayLink 进程风暴，恢复/开盖/合盖等高风险窗口会短时高频扫描，命中异常阈值时只做止血，不永久禁用 RayLink 服务
 - 支持自定义远控拦截名单与自动建议
 - 本地日志
 - 一键导出诊断报告
@@ -37,7 +37,7 @@ SleepSentinel 是一个 Windows 托盘常驻工具，目标是解决两类场景
 - 在 `遵循电源计划` 模式下，系统一旦被外部程序、唤醒定时器或设备唤醒，自动记录原因并按设置执行睡眠、休眠或锁屏。
 - 可以根据 `powercfg` 输出做启发式判断，疑似人工唤醒时跳过自动恢复保护动作。
 - 可选对当前电源计划执行 `powercfg /setacvalueindex scheme_current sub_sleep rtcwake 0` 和 `setdcvalueindex ... rtcwake 0`，直接禁用唤醒定时器。
-- 可监控 RayLink 的异常拉起循环：正常使用不处理；当 `RayLinkWatch.exe`、RayLink 总进程数、6511 本地连接数或服务崩溃证据达到风暴阈值时，停止 RayLink 服务并结束 RayLink 进程树，但不会修改服务启动类型，也不会批量结束普通 `conhost.exe`。
+- 可监控 RayLink 的异常拉起循环：正常使用不处理；恢复、开盖、合盖、解锁或远程接管后会短时提高扫描频率；当 `RayLinkWatch.exe`、RayLink 总进程数、6511 本地连接数或服务崩溃证据达到风暴阈值时，停止 RayLink 服务并结束 RayLink 进程树，但不会修改服务启动类型，也不会批量结束普通 `conhost.exe`。
 - 可把当前设置、最近日志和 `powercfg` 唤醒诊断导出为文本报告，便于排查或发给别人分析。
 
 这个工具做不到的是：

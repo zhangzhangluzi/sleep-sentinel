@@ -1923,6 +1923,7 @@ public sealed class PowerController : IDisposable
                     CancelPendingResumeProtection();
                     CancelPendingResumeEvaluation();
                     ClearManualResumeSignals();
+                    _rayLinkProcessStormGuard.TriggerHighFrequencyScan("系统进入挂起/休眠前");
                     _settings.LastSuspendUtc = DateTimeOffset.UtcNow;
                     SaveSettingsSnapshot();
                     _logger.Warn("系统即将进入挂起/休眠。");
@@ -1932,6 +1933,7 @@ public sealed class PowerController : IDisposable
                 case PowerModes.Resume:
                     var resumedAtUtc = DateTimeOffset.UtcNow;
                     var resumedAtTick = NativeMethods.GetTickCount();
+                    _rayLinkProcessStormGuard.TriggerHighFrequencyScan("系统恢复");
                     _settings.LastResumeUtc = resumedAtUtc;
                     _settings.LastWakeSummary = "正在等待恢复证据…";
                     _settings.LastWakeEvidenceSummary = $"已收到恢复事件，等待约 {ResumeAnalysisDelayMilliseconds / 1000.0:F1} 秒后补抓更完整证据。";
@@ -1975,6 +1977,7 @@ public sealed class PowerController : IDisposable
 
             InvalidateStatusSnapshot();
             var reason = DescribeSessionSwitchReason(e.Reason);
+            _rayLinkProcessStormGuard.TriggerHighFrequencyScan(reason);
             RecordManualResumeSignal(reason);
 
             if (CancelPendingResumeProtection($"检测到{reason}，已取消待执行的自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。"))
@@ -1988,6 +1991,8 @@ public sealed class PowerController : IDisposable
     {
         lock (_stateSync)
         {
+            _rayLinkProcessStormGuard.TriggerHighFrequencyScan(isOpen ? "开盖" : "合盖");
+
             if (!isOpen)
             {
                 return;

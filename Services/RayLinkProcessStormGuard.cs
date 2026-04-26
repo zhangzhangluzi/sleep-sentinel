@@ -15,6 +15,8 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private const int ServiceCrashCorroboratingPortThreshold = 20;
     private static readonly TimeSpan ScanPeriod = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan InitialScanDelay = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan BurstScanPeriod = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan BurstScanDuration = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan ContainmentCooldown = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan ServiceStopTimeout = TimeSpan.FromSeconds(8);
     private static readonly string[] RayLinkProcessNames =
@@ -29,6 +31,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private readonly System.Threading.Timer _timer;
     private readonly object _sync = new();
     private DateTimeOffset _lastContainmentUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _burstScanUntilUtc = DateTimeOffset.MinValue;
     private int _scanInProgress;
     private bool _enabled;
     private bool _autoContain;
@@ -85,6 +88,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             _autoContain = autoContain;
             if (!enabled)
             {
+                _burstScanUntilUtc = DateTimeOffset.MinValue;
                 _timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
                 SetStateUnsafe("RayLink 进程风暴守护未启用", "当前：未启用");
                 return;
@@ -97,6 +101,40 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                 "当前：监控中");
             _timer.Change(InitialScanDelay, ScanPeriod);
         }
+    }
+
+    public void TriggerHighFrequencyScan(string reason)
+    {
+        var shouldLog = false;
+        lock (_sync)
+        {
+            if (_disposed || !_enabled)
+            {
+                return;
+            }
+
+            var previousBurstUntilUtc = _burstScanUntilUtc;
+            var nextBurstUntilUtc = DateTimeOffset.UtcNow.Add(BurstScanDuration);
+            if (nextBurstUntilUtc > _burstScanUntilUtc)
+            {
+                _burstScanUntilUtc = nextBurstUntilUtc;
+            }
+
+            shouldLog = previousBurstUntilUtc <= DateTimeOffset.UtcNow;
+            SetStateUnsafe(
+                _autoContain
+                    ? $"RayLink 进程风暴守护已进入高频扫描；触发：{reason}；异常时自动止血，不禁用服务"
+                    : $"RayLink 进程风暴守护已进入高频扫描；触发：{reason}；当前仅监控",
+                "当前：高频扫描");
+            _timer.Change(TimeSpan.Zero, BurstScanPeriod);
+        }
+
+        if (shouldLog)
+        {
+            _logger.Info($"RayLink 进程风暴守护进入高频扫描：{reason}。");
+        }
+
+        StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void Dispose()
@@ -168,6 +206,26 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
         finally
         {
             Interlocked.Exchange(ref _scanInProgress, 0);
+            RescheduleIfBurstExpired();
+        }
+    }
+
+    private void RescheduleIfBurstExpired()
+    {
+        lock (_sync)
+        {
+            if (_disposed || !_enabled)
+            {
+                return;
+            }
+
+            if (_burstScanUntilUtc != DateTimeOffset.MinValue
+                && DateTimeOffset.UtcNow >= _burstScanUntilUtc)
+            {
+                _burstScanUntilUtc = DateTimeOffset.MinValue;
+                _timer.Change(ScanPeriod, ScanPeriod);
+                _logger.Info("RayLink 进程风暴守护已退出高频扫描，恢复常规轮询。");
+            }
         }
     }
 
