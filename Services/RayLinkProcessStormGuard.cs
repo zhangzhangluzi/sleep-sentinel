@@ -17,8 +17,11 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private static readonly TimeSpan InitialScanDelay = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan BurstScanPeriod = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan BurstScanDuration = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan SleepIsolationScanPeriod = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SleepIsolationRestoreDelay = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan ContainmentCooldown = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan ServiceStopTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan ServiceStartTimeout = TimeSpan.FromSeconds(8);
     private static readonly string[] RayLinkProcessNames =
     [
         "RayLink",
@@ -32,9 +35,13 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private readonly object _sync = new();
     private DateTimeOffset _lastContainmentUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _burstScanUntilUtc = DateTimeOffset.MinValue;
+    private int _restoreGeneration;
     private int _scanInProgress;
     private bool _enabled;
     private bool _autoContain;
+    private bool _isolateDuringSleep;
+    private bool _sleepIsolationActive;
+    private bool _restoreRayLinkServiceAfterSleep;
     private bool _disposed;
     private string _currentSummary = "RayLink 进程风暴守护未启用";
     private string _currentQuickState = "当前：未启用";
@@ -75,7 +82,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
         }
     }
 
-    public void UpdateSettings(bool enabled, bool autoContain)
+    public void UpdateSettings(bool enabled, bool autoContain, bool isolateDuringSleep)
     {
         lock (_sync)
         {
@@ -86,9 +93,20 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
 
             _enabled = enabled;
             _autoContain = autoContain;
+            _isolateDuringSleep = isolateDuringSleep;
+            if (!isolateDuringSleep)
+            {
+                _sleepIsolationActive = false;
+                _restoreRayLinkServiceAfterSleep = false;
+                _restoreGeneration++;
+            }
+
             if (!enabled)
             {
                 _burstScanUntilUtc = DateTimeOffset.MinValue;
+                _sleepIsolationActive = false;
+                _restoreRayLinkServiceAfterSleep = false;
+                _restoreGeneration++;
                 _timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
                 SetStateUnsafe("RayLink 进程风暴守护未启用", "当前：未启用");
                 return;
@@ -101,6 +119,84 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                 "当前：监控中");
             _timer.Change(InitialScanDelay, ScanPeriod);
         }
+    }
+
+    public void BeginSleepIsolation(string reason)
+    {
+        bool enabled;
+        bool isolateDuringSleep;
+        lock (_sync)
+        {
+            enabled = _enabled;
+            isolateDuringSleep = _isolateDuringSleep;
+        }
+
+        if (!enabled || !isolateDuringSleep)
+        {
+            TriggerHighFrequencyScan(reason);
+            return;
+        }
+
+        var shouldRestoreService = IsRayLinkServiceRunning();
+        lock (_sync)
+        {
+            if (_disposed || !_enabled || !_isolateDuringSleep)
+            {
+                return;
+            }
+
+            _sleepIsolationActive = true;
+            _restoreRayLinkServiceAfterSleep |= shouldRestoreService;
+            _restoreGeneration++;
+            SetStateUnsafe(
+                $"RayLink 睡眠隔离已启用；触发：{reason}；睡眠期间会暂停并持续压制 RayLink，不禁用服务",
+                "当前：睡眠隔离中");
+            _timer.Change(TimeSpan.Zero, SleepIsolationScanPeriod);
+        }
+
+        _logger.Warn($"RayLink 睡眠隔离启动：{reason}。将暂停 RayLink，避免睡眠期间被它反复拉起。");
+        EnforceSleepIsolationIfNeeded("睡眠隔离启动");
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public void ScheduleRestoreAfterManualResume(string reason)
+    {
+        int generation;
+        var shouldSchedule = false;
+        lock (_sync)
+        {
+            if (_disposed || !_enabled || !_sleepIsolationActive)
+            {
+                return;
+            }
+
+            generation = ++_restoreGeneration;
+            shouldSchedule = true;
+            SetStateUnsafe(
+                $"RayLink 睡眠隔离等待恢复；触发：{reason}；将在 {SleepIsolationRestoreDelay.TotalSeconds:F0} 秒后恢复服务",
+                "当前：等待恢复");
+            _timer.Change(TimeSpan.Zero, SleepIsolationScanPeriod);
+        }
+
+        if (!shouldSchedule)
+        {
+            return;
+        }
+
+        _logger.Info($"检测到人工恢复（{reason}），RayLink 将在 {SleepIsolationRestoreDelay.TotalSeconds:F0} 秒后恢复。");
+        StateChanged?.Invoke(this, EventArgs.Empty);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(SleepIsolationRestoreDelay).ConfigureAwait(false);
+                CompleteSleepIsolationRestore(generation);
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"RayLink 睡眠隔离恢复任务失败：{ex.Message}");
+            }
+        });
     }
 
     public void TriggerHighFrequencyScan(string reason)
@@ -175,6 +271,12 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                 return;
             }
 
+            if (IsSleepIsolationActive())
+            {
+                EnforceSleepIsolationIfNeeded("睡眠隔离持续拦截");
+                return;
+            }
+
             var snapshot = CollectSnapshot();
             if (!snapshot.IsStorm)
             {
@@ -219,7 +321,8 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                 return;
             }
 
-            if (_burstScanUntilUtc != DateTimeOffset.MinValue
+            if (!_sleepIsolationActive
+                && _burstScanUntilUtc != DateTimeOffset.MinValue
                 && DateTimeOffset.UtcNow >= _burstScanUntilUtc)
             {
                 _burstScanUntilUtc = DateTimeOffset.MinValue;
@@ -227,6 +330,60 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                 _logger.Info("RayLink 进程风暴守护已退出高频扫描，恢复常规轮询。");
             }
         }
+    }
+
+    private bool IsSleepIsolationActive()
+    {
+        lock (_sync)
+        {
+            return !_disposed && _enabled && _sleepIsolationActive;
+        }
+    }
+
+    private void EnforceSleepIsolationIfNeeded(string reason)
+    {
+        if (!HasRayLinkActivity())
+        {
+            SetState("RayLink 睡眠隔离中：RayLink 已暂停，睡眠期间不会放行它重新拉起", "当前：睡眠隔离中");
+            return;
+        }
+
+        var serviceResult = StopRayLinkService();
+        var processResult = KillRayLinkProcessTree();
+        var summary =
+            $"RayLink 睡眠隔离拦截：{reason}；{serviceResult}，结束 RayLink 进程 {processResult.KilledCount} 个；不禁用服务，人工恢复后再延迟恢复";
+
+        if (processResult.Failures.Count > 0)
+        {
+            summary += $"；失败 {processResult.Failures.Count} 项";
+            _logger.Warn($"RayLink 睡眠隔离时部分进程结束失败：{Environment.NewLine}{string.Join(Environment.NewLine, processResult.Failures)}");
+        }
+
+        _logger.Warn(summary);
+        SetState(summary, "当前：已隔离");
+    }
+
+    private void CompleteSleepIsolationRestore(int generation)
+    {
+        var shouldStartService = false;
+        lock (_sync)
+        {
+            if (_disposed || !_enabled || !_sleepIsolationActive || generation != _restoreGeneration)
+            {
+                return;
+            }
+
+            _sleepIsolationActive = false;
+            shouldStartService = _restoreRayLinkServiceAfterSleep;
+            _restoreRayLinkServiceAfterSleep = false;
+            _timer.Change(ScanPeriod, ScanPeriod);
+        }
+
+        var restoreResult = shouldStartService
+            ? StartRayLinkService()
+            : "睡前 RayLinkService 未运行，本次不自动启动";
+        _logger.Info($"RayLink 睡眠隔离已结束：{restoreResult}。");
+        SetState($"RayLink 睡眠隔离已结束：{restoreResult}", "当前：监控中");
     }
 
     private RayLinkStormSnapshot CollectSnapshot()
@@ -330,6 +487,70 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or System.ServiceProcess.TimeoutException or System.TimeoutException)
         {
             return $"RayLinkService 停止失败：{ex.Message}";
+        }
+    }
+
+    private static string StartRayLinkService()
+    {
+        try
+        {
+            using var service = new ServiceController("RayLinkService");
+            if (service.Status is ServiceControllerStatus.Running or ServiceControllerStatus.StartPending)
+            {
+                return "RayLinkService 已运行";
+            }
+
+            service.Start();
+            service.WaitForStatus(ServiceControllerStatus.Running, ServiceStartTimeout);
+            return service.Status == ServiceControllerStatus.Running
+                ? "RayLinkService 已恢复运行"
+                : $"RayLinkService 启动超时（当前 {service.Status}）";
+        }
+        catch (InvalidOperationException)
+        {
+            return "未检测到 RayLinkService";
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or System.ServiceProcess.TimeoutException or System.TimeoutException)
+        {
+            return $"RayLinkService 启动失败：{ex.Message}";
+        }
+    }
+
+    private static bool IsRayLinkServiceRunning()
+    {
+        try
+        {
+            using var service = new ServiceController("RayLinkService");
+            return service.Status is ServiceControllerStatus.Running or ServiceControllerStatus.StartPending;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private static bool HasRayLinkActivity()
+    {
+        if (IsRayLinkServiceRunning())
+        {
+            return true;
+        }
+
+        var processes = EnumerateProcessesSafely().ToArray();
+        try
+        {
+            return processes.Any(IsRayLinkManagedProcess) || CountLoopbackPortConnections(6511) > 0;
+        }
+        finally
+        {
+            foreach (var process in processes)
+            {
+                process.Dispose();
+            }
         }
     }
 

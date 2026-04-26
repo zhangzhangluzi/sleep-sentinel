@@ -48,6 +48,7 @@ public sealed class DiagnosticReportService
         builder.AppendLine($"BlockKnownRemoteWakeRequests: {settings.BlockKnownRemoteWakeRequests}");
         builder.AppendLine($"MonitorRayLinkProcessStorm: {settings.MonitorRayLinkProcessStorm}");
         builder.AppendLine($"AutoContainRayLinkProcessStorm: {settings.AutoContainRayLinkProcessStorm}");
+        builder.AppendLine($"IsolateRayLinkDuringSleep: {settings.IsolateRayLinkDuringSleep}");
         builder.AppendLine($"CustomRemoteWakeEntries: {string.Join(", ", settings.CustomRemoteWakeEntries)}");
         builder.AppendLine($"ActivePowerPlanSummary: {_controller.CurrentPowerPlanSummary}");
         builder.AppendLine($"RiskSummary: {_controller.CurrentRiskSummary}");

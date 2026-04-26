@@ -13,6 +13,7 @@ public sealed class AppSettings
     public bool BlockKnownRemoteWakeRequests { get; set; }
     public bool MonitorRayLinkProcessStorm { get; set; } = true;
     public bool AutoContainRayLinkProcessStorm { get; set; } = true;
+    public bool IsolateRayLinkDuringSleep { get; set; } = true;
     public int BatteryStandbyHibernateTimeoutSeconds { get; set; } = 600;
     public Dictionary<string, PowerPlanRestoreSnapshot> PowerPlanRestoreSnapshots { get; set; } = [];
     public List<string> CustomRemoteWakeEntries { get; set; } = [];
@@ -66,6 +67,7 @@ public sealed class AppSettings
             BlockKnownRemoteWakeRequests = BlockKnownRemoteWakeRequests,
             MonitorRayLinkProcessStorm = MonitorRayLinkProcessStorm,
             AutoContainRayLinkProcessStorm = AutoContainRayLinkProcessStorm,
+            IsolateRayLinkDuringSleep = IsolateRayLinkDuringSleep,
             BatteryStandbyHibernateTimeoutSeconds = BatteryStandbyHibernateTimeoutSeconds,
             PowerPlanRestoreSnapshots = PowerPlanRestoreSnapshots.ToDictionary(
                 static pair => pair.Key,

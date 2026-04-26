@@ -509,7 +509,7 @@ public sealed class PowerController : IDisposable
             EnsureAutostartMatchesSettings();
             SaveSettingsSnapshot();
             InvalidateStatusSnapshot();
-            _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，Wi-Fi Direct 禁用={_settings.DisableWiFiDirectAdapters}，电池兜底休眠={_settings.EnforceBatteryStandbyHibernate}（{DescribePowerSettingDuration(GetBatteryStandbyHibernateTimeoutSeconds())}），远控拦截={_settings.BlockKnownRemoteWakeRequests}，RayLink风暴守护={_settings.MonitorRayLinkProcessStorm}/{_settings.AutoContainRayLinkProcessStorm}，自定义远控={_settings.CustomRemoteWakeEntries.Count} 条。");
+            _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，Wi-Fi Direct 禁用={_settings.DisableWiFiDirectAdapters}，电池兜底休眠={_settings.EnforceBatteryStandbyHibernate}（{DescribePowerSettingDuration(GetBatteryStandbyHibernateTimeoutSeconds())}），远控拦截={_settings.BlockKnownRemoteWakeRequests}，RayLink风暴守护={_settings.MonitorRayLinkProcessStorm}/{_settings.AutoContainRayLinkProcessStorm}，RayLink睡眠隔离={_settings.IsolateRayLinkDuringSleep}，自定义远控={_settings.CustomRemoteWakeEntries.Count} 条。");
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
     }
@@ -546,6 +546,7 @@ public sealed class PowerController : IDisposable
             && previousSettings.BlockKnownRemoteWakeRequests == updatedSettings.BlockKnownRemoteWakeRequests
             && previousSettings.MonitorRayLinkProcessStorm == updatedSettings.MonitorRayLinkProcessStorm
             && previousSettings.AutoContainRayLinkProcessStorm == updatedSettings.AutoContainRayLinkProcessStorm
+            && previousSettings.IsolateRayLinkDuringSleep == updatedSettings.IsolateRayLinkDuringSleep
             && previousSettings.CustomRemoteWakeEntries.SequenceEqual(updatedSettings.CustomRemoteWakeEntries, StringComparer.OrdinalIgnoreCase)
             && previousSettings.StartMinimized == updatedSettings.StartMinimized
             && previousSettings.StartWithWindows == updatedSettings.StartWithWindows;
@@ -1876,8 +1877,9 @@ public sealed class PowerController : IDisposable
     private void ApplyRayLinkProcessStormGuardSettings()
     {
         _rayLinkProcessStormGuard.UpdateSettings(
-            _settings.MonitorRayLinkProcessStorm,
-            _settings.AutoContainRayLinkProcessStorm);
+            _settings.MonitorRayLinkProcessStorm || _settings.IsolateRayLinkDuringSleep,
+            _settings.AutoContainRayLinkProcessStorm,
+            _settings.IsolateRayLinkDuringSleep);
         _settings.RayLinkProcessStormPolicySummary = _rayLinkProcessStormGuard.CurrentSummary;
     }
 
@@ -1909,7 +1911,8 @@ public sealed class PowerController : IDisposable
             || _settings.DisableStandbyConnectivity
             || _settings.DisableWiFiDirectAdapters
             || _settings.EnforceBatteryStandbyHibernate
-            || _settings.BlockKnownRemoteWakeRequests;
+            || _settings.BlockKnownRemoteWakeRequests
+            || _settings.IsolateRayLinkDuringSleep;
     }
 
     private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
@@ -1923,7 +1926,7 @@ public sealed class PowerController : IDisposable
                     CancelPendingResumeProtection();
                     CancelPendingResumeEvaluation();
                     ClearManualResumeSignals();
-                    _rayLinkProcessStormGuard.TriggerHighFrequencyScan("系统进入挂起/休眠前");
+                    _rayLinkProcessStormGuard.BeginSleepIsolation("系统进入挂起/休眠前");
                     _settings.LastSuspendUtc = DateTimeOffset.UtcNow;
                     SaveSettingsSnapshot();
                     _logger.Warn("系统即将进入挂起/休眠。");
@@ -1978,6 +1981,7 @@ public sealed class PowerController : IDisposable
             InvalidateStatusSnapshot();
             var reason = DescribeSessionSwitchReason(e.Reason);
             _rayLinkProcessStormGuard.TriggerHighFrequencyScan(reason);
+            _rayLinkProcessStormGuard.ScheduleRestoreAfterManualResume(reason);
             RecordManualResumeSignal(reason);
 
             if (CancelPendingResumeProtection($"检测到{reason}，已取消待执行的自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。"))
@@ -1991,14 +1995,15 @@ public sealed class PowerController : IDisposable
     {
         lock (_stateSync)
         {
-            _rayLinkProcessStormGuard.TriggerHighFrequencyScan(isOpen ? "开盖" : "合盖");
-
             if (!isOpen)
             {
+                _rayLinkProcessStormGuard.BeginSleepIsolation("合盖");
                 return;
             }
 
             InvalidateStatusSnapshot();
+            _rayLinkProcessStormGuard.TriggerHighFrequencyScan("开盖");
+            _rayLinkProcessStormGuard.ScheduleRestoreAfterManualResume("开盖");
             RecordManualResumeSignal("开盖");
 
             if (CancelPendingResumeProtection($"检测到开盖操作，已取消待执行的自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。"))
@@ -3409,6 +3414,11 @@ public sealed class PowerController : IDisposable
                 else if (HasUserInteractionSince(resumedAtTick) && analysis.Kind == WakeKind.Unknown)
                 {
                     analysis = new WakeAnalysis(WakeKind.Manual, "检测到恢复后立即有人机输入");
+                }
+
+                if (analysis.Kind == WakeKind.Manual)
+                {
+                    _rayLinkProcessStormGuard.ScheduleRestoreAfterManualResume(analysis.Summary);
                 }
 
                 lock (_stateSync)

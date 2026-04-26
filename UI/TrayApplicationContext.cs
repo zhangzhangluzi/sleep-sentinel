@@ -28,6 +28,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _batteryFallbackMenuItem;
     private readonly ToolStripMenuItem _remoteWakeMenuItem;
     private readonly ToolStripMenuItem _rayLinkProcessStormMenuItem;
+    private readonly ToolStripMenuItem _rayLinkSleepIsolationMenuItem;
     private readonly ToolStripMenuItem _startMinimizedMenuItem;
     private readonly ToolStripMenuItem _autostartMenuItem;
     private readonly EventHandler _stateChangedHandler;
@@ -145,6 +146,16 @@ public sealed class TrayApplicationContext : ApplicationContext
             });
         };
         menu.Items.Add(_rayLinkProcessStormMenuItem);
+
+        _rayLinkSleepIsolationMenuItem = new ToolStripMenuItem("RayLink 睡眠隔离");
+        _rayLinkSleepIsolationMenuItem.Click += (_, _) =>
+        {
+            RunTrayAction("切换 RayLink 睡眠隔离", () =>
+            {
+                ToggleSetting(static settings => settings.IsolateRayLinkDuringSleep = !settings.IsolateRayLinkDuringSleep);
+            });
+        };
+        menu.Items.Add(_rayLinkSleepIsolationMenuItem);
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -342,6 +353,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _batteryFallbackMenuItem.Checked = settings.EnforceBatteryStandbyHibernate;
         _remoteWakeMenuItem.Checked = settings.BlockKnownRemoteWakeRequests;
         _rayLinkProcessStormMenuItem.Checked = settings.MonitorRayLinkProcessStorm;
+        _rayLinkSleepIsolationMenuItem.Checked = settings.IsolateRayLinkDuringSleep;
         _startMinimizedMenuItem.Checked = settings.StartMinimized;
         _autostartMenuItem.Checked = settings.StartWithWindows;
     }

@@ -30,6 +30,7 @@ public sealed class MainForm : Form
     private readonly CheckBox _blockKnownRemoteWakeCheckbox;
     private readonly CheckBox _monitorRayLinkProcessStormCheckbox;
     private readonly CheckBox _autoContainRayLinkProcessStormCheckbox;
+    private readonly CheckBox _isolateRayLinkDuringSleepCheckbox;
     private readonly TextBox _customRemoteWakeTextBox;
     private readonly CheckBox _startMinimizedCheckbox;
     private readonly CheckBox _autostartCheckbox;
@@ -276,6 +277,13 @@ public sealed class MainForm : Form
         };
         _autoContainRayLinkProcessStormCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
+        _isolateRayLinkDuringSleepCheckbox = new CheckBox
+        {
+            AutoSize = true,
+            Text = "睡眠隔离 RayLink（合盖/睡眠前暂停，人工恢复后延迟恢复）"
+        };
+        _isolateRayLinkDuringSleepCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
+
         _customRemoteWakeTextBox = new TextBox
         {
             Multiline = true,
@@ -386,6 +394,7 @@ public sealed class MainForm : Form
         _rayLinkProcessStormQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         rayLinkProcessStormActions.Controls.Add(_monitorRayLinkProcessStormCheckbox);
         rayLinkProcessStormActions.Controls.Add(_autoContainRayLinkProcessStormCheckbox);
+        rayLinkProcessStormActions.Controls.Add(_isolateRayLinkDuringSleepCheckbox);
         rayLinkProcessStormActions.Controls.Add(_rayLinkProcessStormQuickStateLabel);
         AddSettingRow(settingsPanel, 9, "RayLink守护", rayLinkProcessStormActions);
 
@@ -603,6 +612,7 @@ public sealed class MainForm : Form
         settings.BlockKnownRemoteWakeRequests = _blockKnownRemoteWakeCheckbox.Checked;
         settings.MonitorRayLinkProcessStorm = _monitorRayLinkProcessStormCheckbox.Checked;
         settings.AutoContainRayLinkProcessStorm = _autoContainRayLinkProcessStormCheckbox.Checked;
+        settings.IsolateRayLinkDuringSleep = _isolateRayLinkDuringSleepCheckbox.Checked;
         settings.CustomRemoteWakeEntries = ParseCustomRemoteWakeEntries(_customRemoteWakeTextBox.Text).ToList();
         settings.StartMinimized = _startMinimizedCheckbox.Checked;
         settings.StartWithWindows = _autostartCheckbox.Checked;
@@ -624,6 +634,7 @@ public sealed class MainForm : Form
             || currentSettings.BlockKnownRemoteWakeRequests != updatedSettings.BlockKnownRemoteWakeRequests
             || currentSettings.MonitorRayLinkProcessStorm != updatedSettings.MonitorRayLinkProcessStorm
             || currentSettings.AutoContainRayLinkProcessStorm != updatedSettings.AutoContainRayLinkProcessStorm
+            || currentSettings.IsolateRayLinkDuringSleep != updatedSettings.IsolateRayLinkDuringSleep
             || !currentSettings.CustomRemoteWakeEntries.SequenceEqual(updatedSettings.CustomRemoteWakeEntries, StringComparer.OrdinalIgnoreCase)
             || currentSettings.StartMinimized != updatedSettings.StartMinimized
             || currentSettings.StartWithWindows != updatedSettings.StartWithWindows;
@@ -647,6 +658,7 @@ public sealed class MainForm : Form
             _blockKnownRemoteWakeCheckbox.Checked = settings.BlockKnownRemoteWakeRequests;
             _monitorRayLinkProcessStormCheckbox.Checked = settings.MonitorRayLinkProcessStorm;
             _autoContainRayLinkProcessStormCheckbox.Checked = settings.AutoContainRayLinkProcessStorm;
+            _isolateRayLinkDuringSleepCheckbox.Checked = settings.IsolateRayLinkDuringSleep;
             _customRemoteWakeTextBox.Text = string.Join(Environment.NewLine, settings.CustomRemoteWakeEntries);
             _startMinimizedCheckbox.Checked = settings.StartMinimized;
             _autostartCheckbox.Checked = settings.StartWithWindows;
