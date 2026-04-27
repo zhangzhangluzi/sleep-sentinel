@@ -1,12 +1,19 @@
 using System.Diagnostics;
+using System.Collections.Generic;
 
 namespace SleepSentinel.Services;
 
 public sealed class PowerCfgService
 {
     private const int TimeoutMilliseconds = 3000;
+    private const int PowerCfgRetryDelayMilliseconds = 120;
+    private const int PowerCfgQueryRetryCount = 2;
+    private static readonly TimeSpan QueryResultCacheDuration = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan QueryFailureCacheDuration = TimeSpan.FromSeconds(10);
     private static readonly string PowerCfgPath = ResolvePowerCfgPath();
     private readonly FileLogger _logger;
+    private readonly object _runSync = new();
+    private readonly Dictionary<string, CachedResult> _queryResultCache = [];
 
     public PowerCfgService(FileLogger logger)
     {
@@ -14,6 +21,54 @@ public sealed class PowerCfgService
     }
 
     public string Run(string arguments, int timeoutMilliseconds = TimeoutMilliseconds)
+    {
+        var normalizedArguments = arguments?.Trim() ?? string.Empty;
+        var now = DateTimeOffset.UtcNow;
+
+        if (!IsQueryCommand(normalizedArguments))
+        {
+            return ExecutePowerCfg(normalizedArguments, timeoutMilliseconds);
+        }
+
+        lock (_runSync)
+        {
+            PurgeExpiredCache(now);
+            if (_queryResultCache.TryGetValue(normalizedArguments, out var cached))
+            {
+                if (cached.ExpiredAtUtc > now)
+                {
+                    return cached.Result;
+                }
+
+                _queryResultCache.Remove(normalizedArguments);
+            }
+
+            var attempts = Math.Max(1, PowerCfgQueryRetryCount);
+            string lastResult = string.Empty;
+            for (var attempt = 1; attempt <= attempts; attempt++)
+            {
+                lastResult = ExecutePowerCfg(normalizedArguments, timeoutMilliseconds);
+                if (!IsPowerCfgTimeoutResult(lastResult))
+                {
+                    break;
+                }
+
+                if (attempt < attempts)
+                {
+                    _logger.Warn($"powercfg {normalizedArguments} 第 {attempt} 次超时，等待 {PowerCfgRetryDelayMilliseconds}ms 后重试。");
+                    Thread.Sleep(PowerCfgRetryDelayMilliseconds);
+                }
+            }
+
+            var cacheTtl = IsPowerCfgTimeoutResult(lastResult)
+                ? QueryFailureCacheDuration
+                : QueryResultCacheDuration;
+            _queryResultCache[normalizedArguments] = new CachedResult(lastResult, now.Add(cacheTtl));
+            return lastResult;
+        }
+    }
+
+    private string ExecutePowerCfg(string arguments, int timeoutMilliseconds = TimeoutMilliseconds)
     {
         try
         {
@@ -64,6 +119,45 @@ public sealed class PowerCfgService
             "powercfg.exe");
         return File.Exists(candidate) ? candidate : "powercfg";
     }
+
+    private static bool IsQueryCommand(string arguments)
+    {
+        return arguments.Equals(string.Empty, StringComparison.Ordinal)
+            || arguments.StartsWith("/q ", StringComparison.OrdinalIgnoreCase)
+            || arguments.StartsWith("/q\t", StringComparison.OrdinalIgnoreCase)
+            || arguments.Equals("/q", StringComparison.OrdinalIgnoreCase)
+            || arguments.StartsWith("/getactivescheme", StringComparison.OrdinalIgnoreCase)
+            || arguments.StartsWith("/requests", StringComparison.OrdinalIgnoreCase)
+            || arguments.StartsWith("/requestsoverride", StringComparison.OrdinalIgnoreCase)
+            || arguments.StartsWith("/waketimers", StringComparison.OrdinalIgnoreCase)
+            || arguments.StartsWith("/lastwake", StringComparison.OrdinalIgnoreCase)
+            || arguments.StartsWith("/sleepstudy", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPowerCfgTimeoutResult(string result)
+    {
+        return result.Contains("超时（超过", StringComparison.Ordinal);
+    }
+
+    private void PurgeExpiredCache(DateTimeOffset now)
+    {
+        if (_queryResultCache.Count == 0)
+        {
+            return;
+        }
+
+        var expiredKeys = _queryResultCache
+            .Where(static kv => kv.Value.ExpiredAtUtc <= now)
+            .Select(static kv => kv.Key)
+            .ToList();
+
+        foreach (var key in expiredKeys)
+        {
+            _queryResultCache.Remove(key);
+        }
+    }
+
+    private readonly record struct CachedResult(string Result, DateTimeOffset ExpiredAtUtc);
 
     private static void TryKillProcess(Process process)
     {

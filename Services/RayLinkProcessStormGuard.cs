@@ -277,7 +277,14 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                 return;
             }
 
-            var snapshot = CollectSnapshot();
+            var inBurstScanWindow = false;
+            lock (_sync)
+            {
+                inBurstScanWindow = _burstScanUntilUtc != DateTimeOffset.MinValue
+                    && DateTimeOffset.UtcNow < _burstScanUntilUtc;
+            }
+
+            var snapshot = CollectSnapshot(includeServiceCrashHistory: !inBurstScanWindow);
             if (!snapshot.IsStorm)
             {
                 SetState(snapshot.BuildHealthySummary(autoContain), snapshot.BuildHealthyQuickState());
@@ -386,7 +393,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
         SetState($"RayLink 睡眠隔离已结束：{restoreResult}", "当前：监控中");
     }
 
-    private RayLinkStormSnapshot CollectSnapshot()
+    private static RayLinkStormSnapshot CollectSnapshot(bool includeServiceCrashHistory = true)
     {
         var processes = EnumerateProcessesSafely().ToArray();
         try
@@ -394,7 +401,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             var watchCount = processes.Count(static process => IsProcessNamed(process, "RayLinkWatch"));
             var totalRayLinkCount = processes.Count(IsRayLinkManagedProcess);
             var portConnectionCount = CountLoopbackPortConnections(6511);
-            var serviceCrashCount = CountRecentServiceCrashes();
+            var serviceCrashCount = includeServiceCrashHistory ? CountRecentServiceCrashes() : 0;
             var hasCrashCorroboratingActivity = watchCount > 1
                 || totalRayLinkCount >= ServiceCrashCorroboratingProcessThreshold
                 || portConnectionCount >= ServiceCrashCorroboratingPortThreshold;
