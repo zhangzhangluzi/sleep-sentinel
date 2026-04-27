@@ -258,6 +258,30 @@ public sealed class PowerController : IDisposable
 
     public event EventHandler<string>? UserNotificationRequested;
 
+    private void RaiseStateChanged()
+    {
+        try
+        {
+            StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"状态变更通知失败：{ex.Message}");
+        }
+    }
+
+    private void RaiseUserNotificationRequested(string message)
+    {
+        try
+        {
+            UserNotificationRequested?.Invoke(this, message);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"用户通知回调失败：{ex.Message}");
+        }
+    }
+
     public AppSettings CurrentSettings => CloneCurrentSettings();
 
     public string CurrentStatus
@@ -516,7 +540,7 @@ public sealed class PowerController : IDisposable
             SaveSettingsSnapshot();
             InvalidateStatusSnapshot();
             _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，Wi-Fi Direct 禁用={_settings.DisableWiFiDirectAdapters}，电池兜底休眠={_settings.EnforceBatteryStandbyHibernate}（{DescribePowerSettingDuration(GetBatteryStandbyHibernateTimeoutSeconds())}），远控拦截={_settings.BlockKnownRemoteWakeRequests}，RayLink风暴守护={_settings.MonitorRayLinkProcessStorm}/{_settings.AutoContainRayLinkProcessStorm}，RayLink睡眠隔离={_settings.IsolateRayLinkDuringSleep}，自定义远控={_settings.CustomRemoteWakeEntries.Count} 条。");
-            StateChanged?.Invoke(this, EventArgs.Empty);
+            RaiseStateChanged();
         }
     }
 
@@ -530,7 +554,7 @@ public sealed class PowerController : IDisposable
         ApplyPolicy(_settings.PolicyMode);
         InvalidateStatusSnapshot();
         _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}。");
-        StateChanged?.Invoke(this, EventArgs.Empty);
+        RaiseStateChanged();
     }
 
     private static bool HasOnlyPolicyModeChanged(AppSettings previousSettings, AppSettings updatedSettings)
@@ -693,7 +717,7 @@ public sealed class PowerController : IDisposable
             EnsureAutostartMatchesSettings();
             SaveSettingsSnapshot();
             _logger.Info("已重新应用当前全部设置。");
-            StateChanged?.Invoke(this, EventArgs.Empty);
+            RaiseStateChanged();
         }
     }
 
@@ -748,7 +772,7 @@ public sealed class PowerController : IDisposable
 
         if (shouldNotify)
         {
-            StateChanged?.Invoke(this, EventArgs.Empty);
+            RaiseStateChanged();
         }
     }
 
@@ -768,8 +792,9 @@ public sealed class PowerController : IDisposable
             }
 
             SaveSettingsSnapshot();
-            StateChanged?.Invoke(this, EventArgs.Empty);
         }
+
+        RaiseStateChanged();
     }
 
     public void ReapplyKnownRemoteWakePolicy()
@@ -786,9 +811,9 @@ public sealed class PowerController : IDisposable
                 RefreshKnownRemoteWakePolicySummary(persistSnapshot: false);
                 SaveSettingsSnapshot();
             }
-
-            StateChanged?.Invoke(this, EventArgs.Empty);
         }
+
+        RaiseStateChanged();
     }
 
     public void ReapplyStandbyConnectivityPolicy()
@@ -807,8 +832,9 @@ public sealed class PowerController : IDisposable
                 _logger.Info(_settings.StandbyConnectivityPolicySummary);
             }
 
-            StateChanged?.Invoke(this, EventArgs.Empty);
         }
+
+        RaiseStateChanged();
     }
 
     public void ReapplyWiFiDirectAdapterPolicy()
@@ -826,9 +852,9 @@ public sealed class PowerController : IDisposable
                 SaveSettingsSnapshot();
                 _logger.Info(_settings.WiFiDirectAdapterPolicySummary);
             }
-
-            StateChanged?.Invoke(this, EventArgs.Empty);
         }
+
+        RaiseStateChanged();
     }
 
     public void ReapplyBatteryStandbyHibernatePolicy()
@@ -846,13 +872,14 @@ public sealed class PowerController : IDisposable
                 SaveSettingsSnapshot();
                 _logger.Info(_settings.BatteryStandbyHibernatePolicySummary);
             }
-
-            StateChanged?.Invoke(this, EventArgs.Empty);
         }
+
+        RaiseStateChanged();
     }
 
     public void BlockSoftwareWake()
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             InvalidateStatusSnapshot();
@@ -860,19 +887,26 @@ public sealed class PowerController : IDisposable
             {
                 _logger.Info("软件/定时器唤醒拦截已启用，正在重新应用当前电源计划策略。");
                 ApplyWakeTimerPolicy();
-                StateChanged?.Invoke(this, EventArgs.Empty);
-                return;
+                shouldNotify = true;
             }
+            else
+            {
+                var updatedSettings = CloneCurrentSettings();
+                updatedSettings.DisableWakeTimers = true;
+                _logger.Info("已通过快捷按钮启用软件/定时器唤醒拦截。");
+                UpdateSettings(updatedSettings);
+            }
+        }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.DisableWakeTimers = true;
-            _logger.Info("已通过快捷按钮启用软件/定时器唤醒拦截。");
-            UpdateSettings(updatedSettings);
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
     public void RestoreSoftwareWake()
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             InvalidateStatusSnapshot();
@@ -880,19 +914,26 @@ public sealed class PowerController : IDisposable
             {
                 _logger.Info("软件/定时器唤醒拦截当前未启用，无需恢复。");
                 RefreshWakeTimerPolicySummary();
-                StateChanged?.Invoke(this, EventArgs.Empty);
-                return;
+                shouldNotify = true;
             }
+            else
+            {
+                var updatedSettings = CloneCurrentSettings();
+                updatedSettings.DisableWakeTimers = false;
+                _logger.Info("已通过快捷按钮请求恢复软件/定时器唤醒策略。");
+                UpdateSettings(updatedSettings);
+            }
+        }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.DisableWakeTimers = false;
-            _logger.Info("已通过快捷按钮请求恢复软件/定时器唤醒策略。");
-            UpdateSettings(updatedSettings);
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
     public void BlockStandbyConnectivityWake()
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             InvalidateStatusSnapshot();
@@ -900,19 +941,26 @@ public sealed class PowerController : IDisposable
             {
                 _logger.Info("待机联网拦截已启用，正在重新应用当前电源计划策略。");
                 ApplyStandbyConnectivityPolicy();
-                StateChanged?.Invoke(this, EventArgs.Empty);
-                return;
+                shouldNotify = true;
             }
+            else
+            {
+                var updatedSettings = CloneCurrentSettings();
+                updatedSettings.DisableStandbyConnectivity = true;
+                _logger.Info("已通过快捷按钮启用待机联网拦截。");
+                UpdateSettings(updatedSettings);
+            }
+        }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.DisableStandbyConnectivity = true;
-            _logger.Info("已通过快捷按钮启用待机联网拦截。");
-            UpdateSettings(updatedSettings);
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
     public void RestoreStandbyConnectivityWake()
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             InvalidateStatusSnapshot();
@@ -920,19 +968,26 @@ public sealed class PowerController : IDisposable
             {
                 _logger.Info("待机联网拦截当前未启用，无需恢复。");
                 RefreshStandbyConnectivityPolicySummary();
-                StateChanged?.Invoke(this, EventArgs.Empty);
-                return;
+                shouldNotify = true;
             }
+            else
+            {
+                var updatedSettings = CloneCurrentSettings();
+                updatedSettings.DisableStandbyConnectivity = false;
+                _logger.Info("已通过快捷按钮请求恢复待机联网策略。");
+                UpdateSettings(updatedSettings);
+            }
+        }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.DisableStandbyConnectivity = false;
-            _logger.Info("已通过快捷按钮请求恢复待机联网策略。");
-            UpdateSettings(updatedSettings);
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
     public void DisableWiFiDirectAdapters()
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             InvalidateStatusSnapshot();
@@ -940,19 +995,26 @@ public sealed class PowerController : IDisposable
             {
                 _logger.Info("Wi-Fi Direct 虚拟适配器禁用策略已启用，正在重新应用。");
                 ApplyWiFiDirectAdapterPolicy();
-                StateChanged?.Invoke(this, EventArgs.Empty);
-                return;
+                shouldNotify = true;
             }
+            else
+            {
+                var updatedSettings = CloneCurrentSettings();
+                updatedSettings.DisableWiFiDirectAdapters = true;
+                _logger.Info("已通过快捷按钮启用 Wi-Fi Direct 虚拟适配器禁用策略。");
+                UpdateSettings(updatedSettings);
+            }
+        }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.DisableWiFiDirectAdapters = true;
-            _logger.Info("已通过快捷按钮启用 Wi-Fi Direct 虚拟适配器禁用策略。");
-            UpdateSettings(updatedSettings);
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
     public void RestoreWiFiDirectAdapters()
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             InvalidateStatusSnapshot();
@@ -960,19 +1022,26 @@ public sealed class PowerController : IDisposable
             {
                 _logger.Info("Wi-Fi Direct 虚拟适配器禁用策略当前未启用，无需恢复。");
                 RefreshWiFiDirectAdapterPolicySummary();
-                StateChanged?.Invoke(this, EventArgs.Empty);
-                return;
+                shouldNotify = true;
             }
+            else
+            {
+                var updatedSettings = CloneCurrentSettings();
+                updatedSettings.DisableWiFiDirectAdapters = false;
+                _logger.Info("已通过快捷按钮请求恢复 Wi-Fi Direct 虚拟适配器状态。");
+                UpdateSettings(updatedSettings);
+            }
+        }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.DisableWiFiDirectAdapters = false;
-            _logger.Info("已通过快捷按钮请求恢复 Wi-Fi Direct 虚拟适配器状态。");
-            UpdateSettings(updatedSettings);
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
     public void EnableBatteryStandbyHibernateFallback()
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             InvalidateStatusSnapshot();
@@ -980,19 +1049,26 @@ public sealed class PowerController : IDisposable
             {
                 _logger.Info("电池兜底休眠已启用，正在重新应用当前电源计划策略。");
                 ApplyBatteryStandbyHibernatePolicy();
-                StateChanged?.Invoke(this, EventArgs.Empty);
-                return;
+                shouldNotify = true;
             }
+            else
+            {
+                var updatedSettings = CloneCurrentSettings();
+                updatedSettings.EnforceBatteryStandbyHibernate = true;
+                _logger.Info("已通过快捷按钮启用电池待机兜底休眠。");
+                UpdateSettings(updatedSettings);
+            }
+        }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.EnforceBatteryStandbyHibernate = true;
-            _logger.Info("已通过快捷按钮启用电池待机兜底休眠。");
-            UpdateSettings(updatedSettings);
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
     public void RestoreBatteryStandbyHibernateFallback()
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             InvalidateStatusSnapshot();
@@ -1000,19 +1076,26 @@ public sealed class PowerController : IDisposable
             {
                 _logger.Info("电池兜底休眠当前未启用，无需恢复。");
                 RefreshBatteryStandbyHibernatePolicySummary();
-                StateChanged?.Invoke(this, EventArgs.Empty);
-                return;
+                shouldNotify = true;
             }
+            else
+            {
+                var updatedSettings = CloneCurrentSettings();
+                updatedSettings.EnforceBatteryStandbyHibernate = false;
+                _logger.Info("已通过快捷按钮请求恢复电池待机休眠策略。");
+                UpdateSettings(updatedSettings);
+            }
+        }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.EnforceBatteryStandbyHibernate = false;
-            _logger.Info("已通过快捷按钮请求恢复电池待机休眠策略。");
-            UpdateSettings(updatedSettings);
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
     public void BlockKnownRemoteWakeRequests()
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             InvalidateStatusSnapshot();
@@ -1020,19 +1103,26 @@ public sealed class PowerController : IDisposable
             {
                 _logger.Info("常见远程软件保持唤醒拦截已启用，正在重新应用规则。");
                 ApplyKnownRemoteWakePolicy();
-                StateChanged?.Invoke(this, EventArgs.Empty);
-                return;
+                shouldNotify = true;
             }
+            else
+            {
+                var updatedSettings = CloneCurrentSettings();
+                updatedSettings.BlockKnownRemoteWakeRequests = true;
+                _logger.Info("已通过快捷按钮启用常见远程软件保持唤醒拦截。");
+                UpdateSettings(updatedSettings);
+            }
+        }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.BlockKnownRemoteWakeRequests = true;
-            _logger.Info("已通过快捷按钮启用常见远程软件保持唤醒拦截。");
-            UpdateSettings(updatedSettings);
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
     public void RestoreKnownRemoteWakeRequests()
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             InvalidateStatusSnapshot();
@@ -1040,14 +1130,20 @@ public sealed class PowerController : IDisposable
             {
                 _logger.Info("常见远程软件保持唤醒拦截当前未启用，无需恢复。");
                 RefreshKnownRemoteWakePolicySummary();
-                StateChanged?.Invoke(this, EventArgs.Empty);
-                return;
+                shouldNotify = true;
             }
+            else
+            {
+                var updatedSettings = CloneCurrentSettings();
+                updatedSettings.BlockKnownRemoteWakeRequests = false;
+                _logger.Info("已通过快捷按钮请求恢复常见远程软件保持唤醒策略。");
+                UpdateSettings(updatedSettings);
+            }
+        }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.BlockKnownRemoteWakeRequests = false;
-            _logger.Info("已通过快捷按钮请求恢复常见远程软件保持唤醒策略。");
-            UpdateSettings(updatedSettings);
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
@@ -1903,12 +1999,12 @@ public sealed class PowerController : IDisposable
             InvalidateStatusSnapshot();
         }
 
-        StateChanged?.Invoke(this, EventArgs.Empty);
+        RaiseStateChanged();
     }
 
     private void OnRayLinkProcessStormNotificationRequested(object? sender, string message)
     {
-        UserNotificationRequested?.Invoke(this, message);
+        RaiseUserNotificationRequested(message);
     }
 
     private bool RequiresElevatedAutostart()
@@ -1924,6 +2020,7 @@ public sealed class PowerController : IDisposable
     private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
     {
         var eventTime = DateTimeOffset.UtcNow;
+        var shouldNotify = false;
         lock (_stateSync)
         {
             if (e.Mode is PowerModes.Suspend)
@@ -1959,7 +2056,7 @@ public sealed class PowerController : IDisposable
                     _settings.LastSuspendUtc = DateTimeOffset.UtcNow;
                     SaveSettingsSnapshot();
                     _logger.Warn("系统即将进入挂起/休眠。");
-                    StateChanged?.Invoke(this, EventArgs.Empty);
+                    shouldNotify = true;
                     break;
 
                 case PowerModes.Resume:
@@ -1971,17 +2068,22 @@ public sealed class PowerController : IDisposable
                     _settings.LastWakeEvidenceSummary = $"已收到恢复事件，等待约 {ResumeAnalysisDelayMilliseconds / 1000.0:F1} 秒后补抓更完整证据。";
                     SaveSettingsSnapshot();
                     _logger.Warn("系统已从挂起/休眠恢复，正在等待系统写入更完整的恢复证据。");
-                    StateChanged?.Invoke(this, EventArgs.Empty);
+                    shouldNotify = true;
                     QueueResumeEvaluation(resumedAtUtc, resumedAtTick);
                     break;
 
                 case PowerModes.StatusChange:
                     if (!ReapplyManagedPoliciesForCurrentPowerPlan("电源状态变化"))
                     {
-                        StateChanged?.Invoke(this, EventArgs.Empty);
+                        shouldNotify = true;
                     }
                     break;
             }
+        }
+
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
@@ -1997,6 +2099,7 @@ public sealed class PowerController : IDisposable
 
     private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             if (e.Reason is not (SessionSwitchReason.SessionUnlock
@@ -2023,13 +2126,19 @@ public sealed class PowerController : IDisposable
 
             if (CancelPendingResumeProtection($"检测到{reason}，已取消待执行的自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。"))
             {
-                StateChanged?.Invoke(this, EventArgs.Empty);
+                shouldNotify = true;
             }
+        }
+
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
     private void OnLidStateChanged(object? sender, bool isOpen)
     {
+        var shouldNotify = false;
         lock (_stateSync)
         {
             var eventTime = DateTimeOffset.UtcNow;
@@ -2055,8 +2164,13 @@ public sealed class PowerController : IDisposable
 
             if (CancelPendingResumeProtection($"检测到开盖操作，已取消待执行的自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。"))
             {
-                StateChanged?.Invoke(this, EventArgs.Empty);
+                shouldNotify = true;
             }
+        }
+
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
         }
     }
 
@@ -2131,7 +2245,7 @@ public sealed class PowerController : IDisposable
             if (HasUserInteractionSince(armedAtTick.Value))
             {
                 _logger.Info($"检测到恢复后已有人工操作，已取消本次自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
-                StateChanged?.Invoke(this, EventArgs.Empty);
+                RaiseStateChanged();
                 return;
             }
 
@@ -2791,7 +2905,7 @@ public sealed class PowerController : IDisposable
                 RefreshBatteryStandbyHibernatePolicySummary();
             }
 
-            StateChanged?.Invoke(this, EventArgs.Empty);
+            RaiseStateChanged();
             return true;
         }
     }
@@ -2997,7 +3111,7 @@ public sealed class PowerController : IDisposable
 
             if (shouldNotify)
             {
-                StateChanged?.Invoke(this, EventArgs.Empty);
+                RaiseStateChanged();
             }
         });
     }
@@ -3475,7 +3589,7 @@ public sealed class PowerController : IDisposable
                     _settings.LastWakeEvidenceSummary = _wakeDiagnostics.SummarizeEvidence(snapshot);
                     SaveSettingsSnapshot();
                     _logger.Warn($"系统已完成恢复分析。判定：{analysis.Summary}{Environment.NewLine}{BuildWakeDiagnosticsText(snapshot, includePowerRequests: true, includeSleepStudy: false)}");
-                    StateChanged?.Invoke(this, EventArgs.Empty);
+                    RaiseStateChanged();
                     ArmResumeProtectionIfNeeded(analysis, resumedAtTick);
                 }
             }
@@ -3488,7 +3602,7 @@ public sealed class PowerController : IDisposable
                     _settings.LastWakeSummary = "恢复分析失败";
                     _settings.LastWakeEvidenceSummary = ex.Message;
                     SaveSettingsSnapshot();
-                    StateChanged?.Invoke(this, EventArgs.Empty);
+                    RaiseStateChanged();
                 }
             }
         });
@@ -3575,7 +3689,7 @@ public sealed class PowerController : IDisposable
         }
 
         _logger.Error($"请求{DescribePowerState(powerState)}失败，系统拒绝执行。");
-        StateChanged?.Invoke(this, EventArgs.Empty);
+        RaiseStateChanged();
     }
 
     private void RequestLockWorkStation(string logMessage)
@@ -3584,12 +3698,12 @@ public sealed class PowerController : IDisposable
         _logger.Warn(logMessage);
         if (NativeMethods.LockWorkStation())
         {
-            StateChanged?.Invoke(this, EventArgs.Empty);
+            RaiseStateChanged();
             return;
         }
 
         _logger.Error($"请求锁屏失败，系统拒绝执行。Win32Error={Marshal.GetLastWin32Error()}");
-        StateChanged?.Invoke(this, EventArgs.Empty);
+        RaiseStateChanged();
     }
 
     private static string DescribePowerState(PowerState powerState)

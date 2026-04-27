@@ -33,6 +33,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _autostartMenuItem;
     private readonly EventHandler _stateChangedHandler;
     private readonly EventHandler<string> _notificationRequestedHandler;
+    private int _queuedTrayRefresh;
     private int _deferredWarmupScheduled;
     private bool _isExiting;
 
@@ -203,7 +204,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         };
 
         _notifyIcon.DoubleClick += (_, _) => ShowMainForm();
-        _stateChangedHandler = (_, _) => RefreshTrayTextOnUiThread();
+        _stateChangedHandler = (_, _) => QueueTrayTextRefresh();
         _controller.StateChanged += _stateChangedHandler;
         _notificationRequestedHandler = (_, message) =>
         {
@@ -358,32 +359,37 @@ public sealed class TrayApplicationContext : ApplicationContext
         _autostartMenuItem.Checked = settings.StartWithWindows;
     }
 
-    private void RefreshTrayTextOnUiThread()
+    private void QueueTrayTextRefresh()
     {
-        if (_isExiting)
+        if (Interlocked.Exchange(ref _queuedTrayRefresh, 1) != 0)
         {
             return;
         }
 
-        if (!_uiInvoker.IsHandleCreated)
+        if (_isExiting || !_uiInvoker.IsHandleCreated)
         {
+            _queuedTrayRefresh = 0;
             return;
         }
 
-        if (_uiInvoker.InvokeRequired)
+        try
         {
-            try
+            _uiInvoker.BeginInvoke(new Action(() =>
             {
-                _uiInvoker.BeginInvoke(new Action(RefreshTrayTextOnUiThread));
-            }
-            catch (InvalidOperationException)
-            {
-            }
-
-            return;
+                try
+                {
+                    RefreshTrayText();
+                }
+                finally
+                {
+                    _queuedTrayRefresh = 0;
+                }
+            }));
         }
-
-        RefreshTrayText();
+        catch (InvalidOperationException)
+        {
+            _queuedTrayRefresh = 0;
+        }
     }
 
     private void ToggleSetting(Action<AppSettings> mutation)

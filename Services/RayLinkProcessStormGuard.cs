@@ -66,6 +66,30 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
 
     public event EventHandler<string>? NotificationRequested;
 
+    private void RaiseStateChanged()
+    {
+        try
+        {
+            StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"RayLink 事件通知失败：{ex.Message}");
+        }
+    }
+
+    private void RaiseNotificationRequested(string message)
+    {
+        try
+        {
+            NotificationRequested?.Invoke(this, message);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"RayLink 通知回调失败：{ex.Message}");
+        }
+    }
+
     public string CurrentSummary
     {
         get
@@ -168,7 +192,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
 
         _logger.Warn($"RayLink 睡眠隔离启动：{reason}。将暂停 RayLink，避免睡眠期间被它反复拉起。");
         EnforceSleepIsolationIfNeeded("睡眠隔离启动");
-        StateChanged?.Invoke(this, EventArgs.Empty);
+        RaiseStateChanged();
     }
 
     public void ScheduleRestoreAfterManualResume(string reason)
@@ -196,7 +220,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
         }
 
         _logger.Info($"检测到人工恢复（{reason}），RayLink 将在 {SleepIsolationRestoreDelay.TotalSeconds:F0} 秒后恢复。");
-        StateChanged?.Invoke(this, EventArgs.Empty);
+        RaiseStateChanged();
         _ = Task.Run(async () =>
         {
             try
@@ -258,7 +282,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             _logger.Info($"RayLink 进程风暴守护进入高频扫描：{reason}。");
         }
 
-        StateChanged?.Invoke(this, EventArgs.Empty);
+        RaiseStateChanged();
     }
 
     public void Dispose()
@@ -342,7 +366,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             if (!autoContain)
             {
                 _logger.Warn(snapshot.BuildStormSummary(autoContain));
-                NotificationRequested?.Invoke(this, snapshot.BuildStormNotification(autoContained: false));
+                RaiseNotificationRequested(snapshot.BuildStormNotification(autoContained: false));
                 return;
             }
 
@@ -510,7 +534,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
 
         _logger.Warn(summary);
         SetState(summary, "当前：已止血");
-        NotificationRequested?.Invoke(this, snapshot.BuildStormNotification(autoContained: true));
+        RaiseNotificationRequested(snapshot.BuildStormNotification(autoContained: true));
     }
 
     private static KillResult KillRayLinkProcessTree()
@@ -645,7 +669,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
 
         if (changed)
         {
-            StateChanged?.Invoke(this, EventArgs.Empty);
+            RaiseStateChanged();
         }
     }
 

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 
 namespace SleepSentinel.Services;
 
@@ -58,10 +59,29 @@ internal sealed class PowerNotificationWindow : NativeWindow, IDisposable
             && m.WParam == (IntPtr)NativeMethods.PbtPowerSettingChange
             && m.LParam != IntPtr.Zero)
         {
-            var setting = Marshal.PtrToStructure<NativeMethods.PowerBroadcastSettingData>(m.LParam);
-            if (setting.PowerSetting == NativeMethods.GuidLidSwitchStateChange)
+            try
             {
-                LidStateChanged?.Invoke(this, setting.Data != 0);
+                var setting = Marshal.PtrToStructure<NativeMethods.PowerBroadcastSettingData>(m.LParam);
+                if (setting.PowerSetting == NativeMethods.GuidLidSwitchStateChange)
+                {
+                    var handler = LidStateChanged;
+                    try
+                    {
+                        handler?.Invoke(this, setting.Data != 0);
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"LidState 监听回调失败：{ex.Message}");
+                    }
+                }
+            }
+            catch (ArgumentException ex)
+            {
+                Debug.WriteLine($"处理 LidState 通知失败：{ex.Message}");
+            }
+            catch (InvalidOperationException ex)
+            {
+                Debug.WriteLine($"处理 LidState 通知失败：{ex.Message}");
             }
         }
 

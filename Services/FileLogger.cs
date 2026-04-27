@@ -79,6 +79,7 @@ public sealed class FileLogger
         var timestamp = DateTime.Now;
         var line = $"[{timestamp:yyyy-MM-dd HH:mm:ss}] [{level}] {message}";
         var path = GetLogPath(timestamp);
+        EventHandler<string>? handler = null;
 
         try
         {
@@ -97,9 +98,15 @@ public sealed class FileLogger
             Debug.WriteLine($"SleepSentinel log write denied: {ex.Message}");
         }
 
+        handler = LogWritten;
+        if (handler is null)
+        {
+            return;
+        }
+
         try
         {
-            LogWritten?.Invoke(this, line);
+            handler(this, line);
         }
         catch (Exception ex)
         {

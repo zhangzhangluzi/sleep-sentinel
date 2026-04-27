@@ -52,6 +52,7 @@ public sealed class MainForm : Form
     private bool _suppressInteractiveToggleEvents;
     private bool _refreshPendingWhileHidden;
     private bool _logsDirtyWhileHidden;
+    private int _queuedStateRefresh;
 
     public MainForm(PowerController controller, FileLogger logger, SettingsStore settingsStore, Icon appIcon)
     {
@@ -476,7 +477,7 @@ public sealed class MainForm : Form
 
         Controls.Add(root);
 
-        _stateChangedHandler = (_, _) => SyncUiFromController(includeDiagnostics: false);
+        _stateChangedHandler = (_, _) => RequestSyncUiFromController(includeDiagnostics: false);
 
         _logger.LogWritten += OnLogWritten;
         _controller.StateChanged += _stateChangedHandler;
@@ -913,6 +914,59 @@ public sealed class MainForm : Form
             {
                 UseWaitCursor = false;
             }
+        }
+    }
+
+    private void RequestSyncUiFromController(bool includeDiagnostics = false)
+    {
+        if (Interlocked.Exchange(ref _queuedStateRefresh, 1) != 0)
+        {
+            return;
+        }
+
+        if (IsDisposed)
+        {
+            _queuedStateRefresh = 0;
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            if (!IsHandleCreated)
+            {
+                _queuedStateRefresh = 0;
+                return;
+            }
+
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    try
+                    {
+                        SyncUiFromController(includeDiagnostics);
+                    }
+                    finally
+                    {
+                        _queuedStateRefresh = 0;
+                    }
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+                _queuedStateRefresh = 0;
+            }
+
+            return;
+        }
+
+        try
+        {
+            SyncUiFromController(includeDiagnostics);
+        }
+        finally
+        {
+            _queuedStateRefresh = 0;
         }
     }
 
