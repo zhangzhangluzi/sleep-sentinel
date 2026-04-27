@@ -90,11 +90,9 @@ public sealed class PowerController : IDisposable
     private static readonly string[] RemoteWakeIndicators =
     [
         "anydesk",
-        "awesun",
         "gameviewer",
         "raylink",
         "rustdesk",
-        "sunlogin",
         "teamviewer",
         "todesk",
         "uu远控"
@@ -3628,3 +3626,4 @@ public sealed class PowerController : IDisposable
 
     private readonly record struct WakeAnalysis(WakeKind Kind, string Summary);
 }
+
