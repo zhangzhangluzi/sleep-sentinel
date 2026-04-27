@@ -56,7 +56,7 @@ SleepSentinel 是一个 Windows 托盘常驻工具，目标是解决两类场景
 
 ```powershell
 dotnet restore
-dotnet publish .\SleepSentinel.csproj -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true
+dotnet publish .\SleepSentinel.csproj -c Release -r win-x64 /p:PublishSingleFile=true
 ```
 
 输出目录通常在：
@@ -82,7 +82,7 @@ GitHub Release 也会自动附带：
 - 每次推送 `main` 都会自动构建并上传安装程序 Artifact
 - 推送形如 `v1.0.0` 的标签时，会自动创建 GitHub Release，并附带带版本号的安装包与便携版可执行文件
 
-当前 Release 采用 `framework-dependent` 小体积单文件发布，因此目标电脑需要安装 `.NET 8 Desktop Runtime`。
+当前 Release 为 `self-contained` 单文件发布，已内置运行时，目标电脑无需额外安装 `.NET 8 Desktop Runtime`。
 
 ## 诊断报告
 

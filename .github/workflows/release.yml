@@ -44,7 +44,7 @@ jobs:
           "release_notes_file=$notesFile" >> $env:GITHUB_OUTPUT
 
       - name: Publish app
-        run: dotnet publish .\SleepSentinel.csproj -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true
+        run: dotnet publish .\SleepSentinel.csproj -c Release -r win-x64 /p:PublishSingleFile=true
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
