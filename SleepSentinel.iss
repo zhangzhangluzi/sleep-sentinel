@@ -1,6 +1,6 @@
 #define MyAppName "SleepSentinel"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.53"
+  #define MyAppVersion "1.0.54"
 #endif
 #define MyAppPublisher "Zhang"
 #define MyAppExeName "SleepSentinel.exe"
@@ -113,3 +113,4 @@ begin
     Result := '安装前无法关闭正在运行的 SleepSentinel，请先从托盘退出后重试。';
   end;
 end;
+
