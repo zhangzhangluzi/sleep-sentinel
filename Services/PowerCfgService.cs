@@ -147,8 +147,8 @@ public sealed class PowerCfgService
         }
 
         var expiredKeys = _queryResultCache
-            .Where(static kv => kv.Value.ExpiredAtUtc <= now)
-            .Select(static kv => kv.Key)
+            .Where(kv => kv.Value.ExpiredAtUtc <= now)
+            .Select(kv => kv.Key)
             .ToList();
 
         foreach (var key in expiredKeys)
@@ -170,3 +170,4 @@ public sealed class PowerCfgService
         }
     }
 }
+
