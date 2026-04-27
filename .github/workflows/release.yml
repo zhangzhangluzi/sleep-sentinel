@@ -33,6 +33,15 @@ jobs:
           "app_version=$appVersion" >> $env:GITHUB_OUTPUT
           "installer_name=SleepSentinel-Setup-v$appVersion-win-x64.exe" >> $env:GITHUB_OUTPUT
           "portable_name=SleepSentinel-v$appVersion-win-x64.exe" >> $env:GITHUB_OUTPUT
+          $repo = "${{ github.repository }}"
+          $notesFile = "release-notes.md"
+          @"
+# SleepSentinel v$appVersion
+下载：
+- 安装版： https://github.com/$repo/releases/download/v$appVersion/SleepSentinel-Setup-v$appVersion-win-x64.exe
+- 便携版： https://github.com/$repo/releases/download/v$appVersion/SleepSentinel-v$appVersion-win-x64.exe
+"@ | Set-Content -Encoding UTF8 $notesFile
+          "release_notes_file=$notesFile" >> $env:GITHUB_OUTPUT
 
       - name: Publish app
         run: dotnet publish .\SleepSentinel.csproj -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true
@@ -73,7 +82,8 @@ jobs:
           gh release view $tag --repo $repo *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag $files --clobber --repo $repo
+            gh release edit $tag --notes-file "${{ steps.version.outputs.release_notes_file }}" --repo $repo
           }
           else {
-            gh release create $tag $files --generate-notes --repo $repo
+            gh release create $tag $files --notes-file "${{ steps.version.outputs.release_notes_file }}" --repo $repo
           }
