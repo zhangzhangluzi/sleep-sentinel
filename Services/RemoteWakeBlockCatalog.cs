@@ -26,18 +26,15 @@ internal static class RemoteWakeBlockCatalog
     private static readonly string[] DiscoveryKeywords =
     [
         "anydesk",
-        "awesun",
         "gameviewer",
         "parsec",
         "raylink",
         "rustdesk",
         "splashtop",
-        "sunlogin",
         "teamviewer",
         "todesk",
         "ultraviewer",
-        "vnc",
-        "oray"
+        "vnc"
     ];
 
     public static IReadOnlyList<PowerRequestOverrideEntry> BuiltInEntries { get; } =
@@ -45,13 +42,6 @@ internal static class RemoteWakeBlockCatalog
         new(PowerRequestOverrideCallerType.Process, "ToDesk.exe", "ToDesk"),
         new(PowerRequestOverrideCallerType.Process, "CoreToolsMgrHelper.exe", "ToDesk"),
         new(PowerRequestOverrideCallerType.Service, "ToDesk_Service", "ToDesk"),
-
-        new(PowerRequestOverrideCallerType.Process, "SunloginClient.exe", "向日葵 / AweSun"),
-        new(PowerRequestOverrideCallerType.Process, "SunloginRemote.exe", "向日葵 / AweSun"),
-        new(PowerRequestOverrideCallerType.Process, "SunloginService.exe", "向日葵 / AweSun"),
-        new(PowerRequestOverrideCallerType.Process, "AweSun.exe", "向日葵 / AweSun"),
-        new(PowerRequestOverrideCallerType.Process, "OldAweSun.exe", "向日葵 / AweSun"),
-        new(PowerRequestOverrideCallerType.Service, "SunloginService", "向日葵 / AweSun"),
 
         new(PowerRequestOverrideCallerType.Process, "GameViewer.exe", "GameViewer / UU远控"),
         new(PowerRequestOverrideCallerType.Process, "GameViewerLauncher.exe", "GameViewer / UU远控"),

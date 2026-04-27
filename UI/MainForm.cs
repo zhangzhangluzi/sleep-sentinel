@@ -242,7 +242,7 @@ public sealed class MainForm : Form
         _blockKnownRemoteWakeCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "拦截常见远程软件的保持唤醒请求（ToDesk、向日葵、GameViewer/UU、AnyDesk、TeamViewer、RustDesk）"
+            Text = "拦截常见远程软件的保持唤醒请求（ToDesk、GameViewer/UU、AnyDesk、TeamViewer、RustDesk）"
         };
         _blockKnownRemoteWakeCheckbox.CheckedChanged += (_, _) =>
         {
