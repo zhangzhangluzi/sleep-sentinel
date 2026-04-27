@@ -27,14 +27,22 @@ internal static class RemoteWakeBlockCatalog
     [
         "anydesk",
         "gameviewer",
+        "anyviewer",
         "parsec",
         "raylink",
+        "radmin",
         "rustdesk",
+        "sunlogin",
+        "向日葵",
         "splashtop",
         "teamviewer",
         "todesk",
         "ultraviewer",
-        "vnc"
+        "vnc",
+        "nomachine",
+        "logmein",
+        "remotepc",
+        "anyconnect"
     ];
 
     public static IReadOnlyList<PowerRequestOverrideEntry> BuiltInEntries { get; } =
@@ -53,15 +61,26 @@ internal static class RemoteWakeBlockCatalog
         new(PowerRequestOverrideCallerType.Process, "AnyDesk.exe", "AnyDesk"),
         new(PowerRequestOverrideCallerType.Process, "ad_svc.exe", "AnyDesk"),
         new(PowerRequestOverrideCallerType.Service, "AnyDesk", "AnyDesk"),
+        new(PowerRequestOverrideCallerType.Process, "AnyViewer.exe", "AnyViewer"),
 
         new(PowerRequestOverrideCallerType.Process, "TeamViewer.exe", "TeamViewer"),
         new(PowerRequestOverrideCallerType.Process, "TeamViewer_Service.exe", "TeamViewer"),
         new(PowerRequestOverrideCallerType.Service, "TeamViewer", "TeamViewer"),
 
+        new(PowerRequestOverrideCallerType.Process, "parsecd.exe", "Parsec"),
+        new(PowerRequestOverrideCallerType.Process, "parsec.exe", "Parsec"),
+        new(PowerRequestOverrideCallerType.Service, "parsec", "Parsec"),
+
         new(PowerRequestOverrideCallerType.Process, "RustDesk.exe", "RustDesk"),
         new(PowerRequestOverrideCallerType.Process, "rustdesk.exe", "RustDesk"),
         new(PowerRequestOverrideCallerType.Process, "RustDeskService.exe", "RustDesk"),
-        new(PowerRequestOverrideCallerType.Service, "RustDesk", "RustDesk")
+        new(PowerRequestOverrideCallerType.Service, "RustDesk", "RustDesk"),
+
+        new(PowerRequestOverrideCallerType.Process, "vncviewer.exe", "VNC"),
+        new(PowerRequestOverrideCallerType.Process, "winvnc.exe", "VNC"),
+        new(PowerRequestOverrideCallerType.Process, "tvnserver.exe", "VNC"),
+        new(PowerRequestOverrideCallerType.Service, "tvnserver", "VNC"),
+        new(PowerRequestOverrideCallerType.Process, "UltraViewer.exe", "UltraViewer")
     ];
 
     public static IReadOnlyList<PowerRequestOverrideEntry> GetManagedEntries(IEnumerable<string>? customRawEntries)
