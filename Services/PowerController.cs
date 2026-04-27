@@ -11,6 +11,9 @@ namespace SleepSentinel.Services;
 public sealed class PowerController : IDisposable
 {
     private static readonly TimeSpan ManualResumeSignalWindow = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan ResumeEventDebounceWindow = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SessionSwitchEventDebounceWindow = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan LidEventDebounceWindow = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan StatusSnapshotMaxAge = TimeSpan.FromSeconds(15);
     private const int ResumeAnalysisDelayMilliseconds = 1500;
     private const int DefaultBatteryStandbyHibernateTimeoutSeconds = 600;
@@ -140,6 +143,11 @@ public sealed class PowerController : IDisposable
     private readonly System.Threading.Timer _resumeTimer;
     private DateTimeOffset? _lastManualResumeSignalUtc;
     private string _lastManualResumeSignalReason = "人工操作";
+    private DateTimeOffset _lastResumeModeEventUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastSuspendModeEventUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastSessionSwitchEventUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastLidStateEventUtc = DateTimeOffset.MinValue;
+    private bool? _lastLidState;
     private string _activePowerPlanKey = string.Empty;
     private bool _startupWarmupCompleted;
     private bool _startupWarmupInProgress;
@@ -1915,8 +1923,31 @@ public sealed class PowerController : IDisposable
 
     private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
     {
+        var eventTime = DateTimeOffset.UtcNow;
         lock (_stateSync)
         {
+            if (e.Mode is PowerModes.Suspend)
+            {
+                if (eventTime - _lastSuspendModeEventUtc < ResumeEventDebounceWindow)
+                {
+                    _logger.Warn($"检测到重复的电源事件 {e.Mode}，间隔过短（{ResumeEventDebounceWindow.TotalSeconds:F1}s），已忽略。");
+                    return;
+                }
+
+                _lastSuspendModeEventUtc = eventTime;
+            }
+
+            if (e.Mode is PowerModes.Resume)
+            {
+                if (eventTime - _lastResumeModeEventUtc < ResumeEventDebounceWindow)
+                {
+                    _logger.Warn($"检测到重复的电源事件 {e.Mode}，间隔过短（{ResumeEventDebounceWindow.TotalSeconds:F1}s），已忽略。");
+                    return;
+                }
+
+                _lastResumeModeEventUtc = eventTime;
+            }
+
             InvalidateStatusSnapshot();
             switch (e.Mode)
             {
@@ -1976,7 +2007,15 @@ public sealed class PowerController : IDisposable
                 return;
             }
 
+            var eventTime = DateTimeOffset.UtcNow;
+            if (eventTime - _lastSessionSwitchEventUtc < SessionSwitchEventDebounceWindow)
+            {
+                _logger.Warn($"检测到重复的会话切换事件 {e.Reason}，间隔过短，已忽略。");
+                return;
+            }
+
             InvalidateStatusSnapshot();
+            _lastSessionSwitchEventUtc = eventTime;
             var reason = DescribeSessionSwitchReason(e.Reason);
             _rayLinkProcessStormGuard.TriggerHighFrequencyScan(reason);
             _rayLinkProcessStormGuard.ScheduleRestoreAfterManualResume(reason);
@@ -1993,6 +2032,16 @@ public sealed class PowerController : IDisposable
     {
         lock (_stateSync)
         {
+            var eventTime = DateTimeOffset.UtcNow;
+            if (isOpen == _lastLidState && eventTime - _lastLidStateEventUtc < LidEventDebounceWindow)
+            {
+                _logger.Warn($"检测到重复的 lid 状态 {isOpen}，间隔过短（{LidEventDebounceWindow.TotalSeconds:F1}s），已忽略。");
+                return;
+            }
+
+            _lastLidState = isOpen;
+            _lastLidStateEventUtc = eventTime;
+
             if (!isOpen)
             {
                 _rayLinkProcessStormGuard.BeginSleepIsolation("合盖");

@@ -17,6 +17,9 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private static readonly TimeSpan InitialScanDelay = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan BurstScanPeriod = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan BurstScanDuration = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan BurstScanTriggerCooldown = TimeSpan.FromSeconds(5);
+    private const int StableWindowNormalizeThreshold = 2;
+    private const int StormConsecutiveConfirmations = 2;
     private static readonly TimeSpan SleepIsolationScanPeriod = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan SleepIsolationRestoreDelay = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan ContainmentCooldown = TimeSpan.FromSeconds(20);
@@ -35,6 +38,9 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private readonly object _sync = new();
     private DateTimeOffset _lastContainmentUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _burstScanUntilUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastBurstTriggerUtc = DateTimeOffset.MinValue;
+    private int _burstNormalizingSamples;
+    private int _consecutiveStormSamples;
     private int _restoreGeneration;
     private int _scanInProgress;
     private bool _enabled;
@@ -94,6 +100,9 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             _enabled = enabled;
             _autoContain = autoContain;
             _isolateDuringSleep = isolateDuringSleep;
+            _lastBurstTriggerUtc = DateTimeOffset.MinValue;
+            _burstNormalizingSamples = 0;
+            _consecutiveStormSamples = 0;
             if (!isolateDuringSleep)
             {
                 _sleepIsolationActive = false;
@@ -104,6 +113,9 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             if (!enabled)
             {
                 _burstScanUntilUtc = DateTimeOffset.MinValue;
+                _lastBurstTriggerUtc = DateTimeOffset.MinValue;
+                _burstNormalizingSamples = 0;
+                _consecutiveStormSamples = 0;
                 _sleepIsolationActive = false;
                 _restoreRayLinkServiceAfterSleep = false;
                 _restoreGeneration++;
@@ -211,6 +223,21 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
 
             var previousBurstUntilUtc = _burstScanUntilUtc;
             var nextBurstUntilUtc = DateTimeOffset.UtcNow.Add(BurstScanDuration);
+            var now = DateTimeOffset.UtcNow;
+            var isBurstActive = previousBurstUntilUtc != DateTimeOffset.MinValue && now < previousBurstUntilUtc;
+
+            if (isBurstActive && now - _lastBurstTriggerUtc < BurstScanTriggerCooldown)
+            {
+                SetStateUnsafe(
+                    _autoContain
+                        ? $"RayLink 进程风暴守护已进入高频扫描；触发：{reason}；异常时自动止血，不禁用服务"
+                        : $"RayLink 进程风暴守护已进入高频扫描；触发：{reason}；当前仅监控",
+                    "当前：高频扫描");
+                _burstScanUntilUtc = nextBurstUntilUtc;
+                _lastBurstTriggerUtc = now;
+                return;
+            }
+
             if (nextBurstUntilUtc > _burstScanUntilUtc)
             {
                 _burstScanUntilUtc = nextBurstUntilUtc;
@@ -223,6 +250,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                     : $"RayLink 进程风暴守护已进入高频扫描；触发：{reason}；当前仅监控",
                 "当前：高频扫描");
             _timer.Change(TimeSpan.Zero, BurstScanPeriod);
+            _lastBurstTriggerUtc = now;
         }
 
         if (shouldLog)
@@ -287,8 +315,27 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             var snapshot = CollectSnapshot(includeServiceCrashHistory: !inBurstScanWindow);
             if (!snapshot.IsStorm)
             {
+                lock (_sync)
+                {
+                    _consecutiveStormSamples = 0;
+                    _burstNormalizingSamples++;
+                    if (_sleepIsolationActive)
+                    {
+                        _burstNormalizingSamples = 0;
+                    }
+                }
+
                 SetState(snapshot.BuildHealthySummary(autoContain), snapshot.BuildHealthyQuickState());
+                RescheduleIfBurstNormalized();
                 return;
+            }
+
+            var consecutiveSamples = 0;
+            lock (_sync)
+            {
+                _burstNormalizingSamples = 0;
+                _consecutiveStormSamples = Math.Min(_consecutiveStormSamples + 1, StormConsecutiveConfirmations);
+                consecutiveSamples = _consecutiveStormSamples;
             }
 
             SetState(snapshot.BuildStormSummary(autoContain), "当前：检测到风暴");
@@ -296,6 +343,12 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             {
                 _logger.Warn(snapshot.BuildStormSummary(autoContain));
                 NotificationRequested?.Invoke(this, snapshot.BuildStormNotification(autoContained: false));
+                return;
+            }
+
+            if (consecutiveSamples < StormConsecutiveConfirmations)
+            {
+                _logger.Warn($"RayLink 风暴疑似命中（{consecutiveSamples}/{StormConsecutiveConfirmations} 次确认），暂不执行自动止血。");
                 return;
             }
 
@@ -336,6 +389,27 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                 _timer.Change(ScanPeriod, ScanPeriod);
                 _logger.Info("RayLink 进程风暴守护已退出高频扫描，恢复常规轮询。");
             }
+        }
+    }
+
+    private void RescheduleIfBurstNormalized()
+    {
+        lock (_sync)
+        {
+            if (_disposed || !_enabled || _sleepIsolationActive || _burstScanUntilUtc == DateTimeOffset.MinValue)
+            {
+                return;
+            }
+
+            if (_burstNormalizingSamples < StableWindowNormalizeThreshold)
+            {
+                return;
+            }
+
+            _burstScanUntilUtc = DateTimeOffset.UtcNow;
+            _burstNormalizingSamples = 0;
+            _timer.Change(ScanPeriod, ScanPeriod);
+            _logger.Info("RayLink 进程风暴守护在高频窗口内持续稳定健康，已退出高频扫描。");
         }
     }
 

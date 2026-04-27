@@ -1,6 +1,8 @@
 using SleepSentinel.Services;
 using SleepSentinel.UI;
+using System.Text;
 using System.Security.Principal;
+using System.Threading.Tasks;
 
 namespace SleepSentinel;
 
@@ -31,9 +33,57 @@ internal static class Program
         var settings = settingsStore.Load();
         using var appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
         using var controller = new PowerController(settingsStore, logger, settings);
+        RegisterGlobalExceptionHandlers(logger.LogDirectory);
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         using var trayContext = new TrayApplicationContext(controller, logger, settingsStore, appIcon, activationEvent, takeoverEvent);
 
         Application.Run(trayContext);
+    }
+
+    private static void RegisterGlobalExceptionHandlers(string logDirectory)
+    {
+        var appFolder = Path.GetDirectoryName(logDirectory) ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var crashPath = Path.Combine(appFolder, "crash.log");
+
+        Application.ThreadException += (_, e) =>
+        {
+            LogUnhandledException(crashPath, e.Exception);
+        };
+
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            LogUnhandledException(crashPath, e.Exception);
+            e.SetObserved();
+        };
+
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            if (e.ExceptionObject is Exception ex)
+            {
+                LogUnhandledException(crashPath, ex);
+            }
+            else
+            {
+                LogUnhandledException(crashPath, new Exception($"Unhandled exception: {e.ExceptionObject}"));
+            }
+        };
+    }
+
+    private static void LogUnhandledException(string crashLogPath, Exception ex)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(crashLogPath)!);
+            var message = new StringBuilder();
+            message.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [Unhandled] {ex}");
+            File.AppendAllText(crashLogPath, message.ToString(), Encoding.UTF8);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 
     private static Mutex? AcquireSingleInstance(EventWaitHandle activationEvent, EventWaitHandle takeoverEvent)
