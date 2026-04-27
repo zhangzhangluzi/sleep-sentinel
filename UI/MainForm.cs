@@ -1,5 +1,6 @@
 using SleepSentinel.Models;
 using SleepSentinel.Services;
+using System.Threading;
 
 namespace SleepSentinel.UI;
 
@@ -53,6 +54,8 @@ public sealed class MainForm : Form
     private bool _refreshPendingWhileHidden;
     private bool _logsDirtyWhileHidden;
     private int _queuedStateRefresh;
+    private readonly SemaphoreSlim _controllerMutationGate = new(initialCount: 1);
+    private int _pendingControllerMutationGeneration;
 
     public MainForm(PowerController controller, FileLogger logger, SettingsStore settingsStore, Icon appIcon)
     {
@@ -138,72 +141,21 @@ public sealed class MainForm : Form
             AutoSize = true,
             Text = "关闭当前电源计划的唤醒定时器（AC/DC）"
         };
-        _disableWakeTimersCheckbox.CheckedChanged += (_, _) =>
-        {
-            if (_suppressInteractiveToggleEvents)
-            {
-                return;
-            }
-
-            if (_disableWakeTimersCheckbox.Checked)
-            {
-                _controller.BlockSoftwareWake();
-            }
-            else
-            {
-                _controller.RestoreSoftwareWake();
-            }
-
-            SyncUiFromController();
-        };
+        _disableWakeTimersCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
         _disableStandbyConnectivityCheckbox = new CheckBox
         {
             AutoSize = true,
             Text = "关闭待机状态下的网络连接（AC/DC，减少 Windows Update/更新协调器在合盖待机时拉活）"
         };
-        _disableStandbyConnectivityCheckbox.CheckedChanged += (_, _) =>
-        {
-            if (_suppressInteractiveToggleEvents)
-            {
-                return;
-            }
-
-            if (_disableStandbyConnectivityCheckbox.Checked)
-            {
-                _controller.BlockStandbyConnectivityWake();
-            }
-            else
-            {
-                _controller.RestoreStandbyConnectivityWake();
-            }
-
-            SyncUiFromController();
-        };
+        _disableStandbyConnectivityCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
         _disableWiFiDirectAdaptersCheckbox = new CheckBox
         {
             AutoSize = true,
             Text = "禁用 Microsoft Wi-Fi Direct 虚拟适配器（降低 S0 待机恢复异常；影响无线投屏/移动热点/附近共享）"
         };
-        _disableWiFiDirectAdaptersCheckbox.CheckedChanged += (_, _) =>
-        {
-            if (_suppressInteractiveToggleEvents)
-            {
-                return;
-            }
-
-            if (_disableWiFiDirectAdaptersCheckbox.Checked)
-            {
-                _controller.DisableWiFiDirectAdapters();
-            }
-            else
-            {
-                _controller.RestoreWiFiDirectAdapters();
-            }
-
-            SyncUiFromController();
-        };
+        _disableWiFiDirectAdaptersCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
         _batteryStandbyHibernateTimeoutInput = new NumericUpDown
         {
@@ -221,48 +173,14 @@ public sealed class MainForm : Form
         {
             AutoSize = true
         };
-        _enforceBatteryStandbyHibernateCheckbox.CheckedChanged += (_, _) =>
-        {
-            if (_suppressInteractiveToggleEvents)
-            {
-                return;
-            }
-
-            if (_enforceBatteryStandbyHibernateCheckbox.Checked)
-            {
-                _controller.EnableBatteryStandbyHibernateFallback();
-            }
-            else
-            {
-                _controller.RestoreBatteryStandbyHibernateFallback();
-            }
-
-            SyncUiFromController();
-        };
+        _enforceBatteryStandbyHibernateCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
         _blockKnownRemoteWakeCheckbox = new CheckBox
         {
             AutoSize = true,
             Text = "拦截常见远程软件的保持唤醒请求（ToDesk、GameViewer/UU、AnyDesk、TeamViewer、RustDesk）"
         };
-        _blockKnownRemoteWakeCheckbox.CheckedChanged += (_, _) =>
-        {
-            if (_suppressInteractiveToggleEvents)
-            {
-                return;
-            }
-
-            if (_blockKnownRemoteWakeCheckbox.Checked)
-            {
-                _controller.BlockKnownRemoteWakeRequests();
-            }
-            else
-            {
-                _controller.RestoreKnownRemoteWakeRequests();
-            }
-
-            SyncUiFromController();
-        };
+        _blockKnownRemoteWakeCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
         _monitorRayLinkProcessStormCheckbox = new CheckBox
         {
@@ -319,8 +237,10 @@ public sealed class MainForm : Form
         var reapplyWakeTimerButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyWakeTimerButton.Click += (_, _) =>
         {
-            _controller.ReapplyWakeTimerPolicy();
-            SyncUiFromController();
+            if (!ApplyUiSettingsIfChanged())
+            {
+                ApplyControllerActionInBackground("重新应用唤醒定时器策略", _controller.ReapplyWakeTimerPolicy);
+            }
         };
         _wakeTimerQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         wakeTimerActions.Controls.Add(_disableWakeTimersCheckbox);
@@ -332,8 +252,10 @@ public sealed class MainForm : Form
         var reapplyStandbyConnectivityButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyStandbyConnectivityButton.Click += (_, _) =>
         {
-            _controller.ReapplyStandbyConnectivityPolicy();
-            SyncUiFromController();
+            if (!ApplyUiSettingsIfChanged())
+            {
+                ApplyControllerActionInBackground("重新应用待机联网策略", _controller.ReapplyStandbyConnectivityPolicy);
+            }
         };
         _standbyConnectivityQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         standbyConnectivityActions.Controls.Add(_disableStandbyConnectivityCheckbox);
@@ -345,8 +267,10 @@ public sealed class MainForm : Form
         var reapplyWiFiDirectButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyWiFiDirectButton.Click += (_, _) =>
         {
-            _controller.ReapplyWiFiDirectAdapterPolicy();
-            SyncUiFromController();
+            if (!ApplyUiSettingsIfChanged())
+            {
+                ApplyControllerActionInBackground("重新应用 Wi-Fi Direct 策略", _controller.ReapplyWiFiDirectAdapterPolicy);
+            }
         };
         _wifiDirectQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         wifiDirectActions.Controls.Add(_disableWiFiDirectAdaptersCheckbox);
@@ -360,8 +284,7 @@ public sealed class MainForm : Form
         {
             if (!ApplyUiSettingsIfChanged())
             {
-                _controller.ReapplyBatteryStandbyHibernatePolicy();
-                SyncUiFromController();
+                ApplyControllerActionInBackground("重新应用电池兜底休眠策略", _controller.ReapplyBatteryStandbyHibernatePolicy);
             }
         };
         _batteryStandbyHibernateQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
@@ -378,8 +301,7 @@ public sealed class MainForm : Form
         {
             if (!ApplyUiSettingsIfChanged())
             {
-                _controller.ReapplyKnownRemoteWakePolicy();
-                SyncUiFromController();
+                ApplyControllerActionInBackground("重新应用远控拦截策略", _controller.ReapplyKnownRemoteWakePolicy);
             }
         };
         var suggestRemoteWakeButton = new Button { Text = "自动建议", AutoSize = true };
@@ -429,8 +351,7 @@ public sealed class MainForm : Form
         {
             if (!ApplyUiSettingsIfChanged())
             {
-                _controller.ReapplyAllManagedSettings();
-                SyncUiFromController(includeDiagnostics: false);
+                ApplyControllerActionInBackground("重新应用全部设置", _controller.ReapplyAllManagedSettings);
             }
         };
         var sleepButton = new Button { Text = "立即睡眠", AutoSize = true };
@@ -532,6 +453,7 @@ public sealed class MainForm : Form
     {
         if (disposing)
         {
+            _controllerMutationGate.Dispose();
             _logger.LogWritten -= OnLogWritten;
             _controller.StateChanged -= _stateChangedHandler;
             _appIcon.Dispose();
@@ -559,8 +481,7 @@ public sealed class MainForm : Form
             return false;
         }
 
-        _controller.UpdateSettings(settings);
-        SyncUiFromController(includeDiagnostics: false);
+        ApplyControllerMutationInBackground("应用界面设置", () => _controller.UpdateSettings(settings));
         return true;
     }
 
@@ -571,8 +492,8 @@ public sealed class MainForm : Form
             return;
         }
 
-        _controller.UpdateCustomRemoteWakeEntries(ParseCustomRemoteWakeEntries(_customRemoteWakeTextBox.Text));
-        SyncUiFromController(includeDiagnostics: false);
+        var entries = ParseCustomRemoteWakeEntries(_customRemoteWakeTextBox.Text).ToList();
+        ApplyControllerMutationInBackground("应用自定义远控名单", () => _controller.UpdateCustomRemoteWakeEntries(entries));
     }
 
     private void SuggestCustomRemoteWakeEntries()
@@ -593,6 +514,71 @@ public sealed class MainForm : Form
         _customRemoteWakeTextBox.Text = string.Join(Environment.NewLine, mergedEntries);
         ApplyCustomRemoteEntriesFromUi();
         MessageBox.Show($"已追加 {suggestions.Count} 条候选项到自定义远控名单。", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private void ApplyControllerActionInBackground(string actionName, Action action)
+    {
+        ApplyControllerMutationInBackground(actionName, action);
+    }
+
+    private void ApplyControllerMutationInBackground(string actionName, Action mutation)
+    {
+        var generation = Interlocked.Increment(ref _pendingControllerMutationGeneration);
+
+        _ = Task.Run(async () =>
+        {
+            bool gateAcquired = false;
+            try
+            {
+                await _controllerMutationGate.WaitAsync().ConfigureAwait(false);
+                gateAcquired = true;
+
+                if (generation != Volatile.Read(ref _pendingControllerMutationGeneration))
+                {
+                    return;
+                }
+
+                if (IsDisposed)
+                {
+                    return;
+                }
+
+                mutation();
+            }
+            catch (ObjectDisposedException ex)
+            {
+                _logger.Warn($"执行 {actionName} 已取消，因界面已关闭：{ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                _logger.Error($"执行 {actionName} 失败：{ex.Message}");
+                if (IsHandleCreated && !IsDisposed)
+                {
+                    try
+                    {
+                        BeginInvoke(new Action(() =>
+                        {
+                            MessageBox.Show($"执行“{actionName}”失败：{ex.Message}", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }));
+                    }
+                    catch (InvalidOperationException)
+                    {
+                    }
+                }
+            }
+            finally
+            {
+                if (gateAcquired)
+                {
+                    _controllerMutationGate.Release();
+                }
+
+                if (!IsDisposed)
+                {
+                    RequestSyncUiFromController(includeDiagnostics: false);
+                }
+            }
+        });
     }
 
     private AppSettings CreateSettingsFromUi()

@@ -23,6 +23,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private static readonly TimeSpan SleepIsolationScanPeriod = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan SleepIsolationRestoreDelay = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan ContainmentCooldown = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan SleepIsolationActionCooldown = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ServiceStopTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan ServiceStartTimeout = TimeSpan.FromSeconds(8);
     private static readonly string[] RayLinkProcessNames =
@@ -37,6 +38,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private readonly System.Threading.Timer _timer;
     private readonly object _sync = new();
     private DateTimeOffset _lastContainmentUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastSleepIsolationActionUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _burstScanUntilUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastBurstTriggerUtc = DateTimeOffset.MinValue;
     private int _burstNormalizingSamples;
@@ -325,6 +327,26 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
 
             if (IsSleepIsolationActive())
             {
+                var shouldSkip = false;
+                lock (_sync)
+                {
+                    if (_lastSleepIsolationActionUtc != DateTimeOffset.MinValue
+                        && DateTimeOffset.UtcNow - _lastSleepIsolationActionUtc < SleepIsolationActionCooldown)
+                    {
+                        shouldSkip = true;
+                    }
+                    else
+                    {
+                        _lastSleepIsolationActionUtc = DateTimeOffset.UtcNow;
+                    }
+                }
+
+                if (shouldSkip)
+                {
+                    SetState("RayLink 睡眠隔离中：已进入 15 秒抑制期，避免重复触发", "当前：睡眠隔离中");
+                    return;
+                }
+
                 EnforceSleepIsolationIfNeeded("睡眠隔离持续拦截");
                 return;
             }
@@ -498,7 +520,10 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
         {
             var watchCount = processes.Count(static process => IsProcessNamed(process, "RayLinkWatch"));
             var totalRayLinkCount = processes.Count(IsRayLinkManagedProcess);
-            var portConnectionCount = CountLoopbackPortConnections(6511);
+            var hasLikelyRayLinkActivity = IsRayLinkServiceRunning() || totalRayLinkCount > 0;
+            var portConnectionCount = hasLikelyRayLinkActivity
+                ? CountLoopbackPortConnections(6511)
+                : 0;
             var serviceCrashCount = includeServiceCrashHistory ? CountRecentServiceCrashes() : 0;
             var hasCrashCorroboratingActivity = watchCount > 1
                 || totalRayLinkCount >= ServiceCrashCorroboratingProcessThreshold

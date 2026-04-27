@@ -20,8 +20,10 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        RegisterGlobalExceptionHandlers(GetCrashLogDirectory());
-        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        var crashDirectory = GetCrashLogDirectory();
+        var startupCrashLogPath = GetCrashLogPath();
+        RegisterGlobalExceptionHandlers(crashDirectory);
+        TrySetUnhandledExceptionMode(startupCrashLogPath);
         var isQuietStartup = ShouldStartQuietly(args);
 
         using var activationEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivationEventName);
@@ -86,6 +88,18 @@ internal static class Program
     private static string GetCrashLogPath()
     {
         return Path.Combine(GetCrashLogDirectory(), "crash.log");
+    }
+
+    private static void TrySetUnhandledExceptionMode(string crashLogPath)
+    {
+        try
+        {
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        }
+        catch (Exception ex)
+        {
+            LogUnhandledException(crashLogPath, ex);
+        }
     }
 
     private static bool ShouldStartQuietly(string[] args)

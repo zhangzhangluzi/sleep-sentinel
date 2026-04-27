@@ -11,11 +11,13 @@ namespace SleepSentinel.Services;
 public sealed class PowerController : IDisposable
 {
     private static readonly TimeSpan ManualResumeSignalWindow = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan ManualResumeCorrelationWindow = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ResumeProtectionSuppressionWindow = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan ResumeEventDebounceWindow = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan SessionSwitchEventDebounceWindow = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan LidEventDebounceWindow = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan StatusSnapshotMaxAge = TimeSpan.FromSeconds(15);
-    private const int ResumeAnalysisDelayMilliseconds = 1500;
+    private const int ResumeAnalysisDelayMilliseconds = 1800;
     private const int DefaultBatteryStandbyHibernateTimeoutSeconds = 600;
     private const int PowerShellTimeoutMilliseconds = 10000;
     private const int WakeTimerDisabledValue = 0;
@@ -147,6 +149,7 @@ public sealed class PowerController : IDisposable
     private DateTimeOffset _lastSuspendModeEventUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastSessionSwitchEventUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastLidStateEventUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastResumeProtectionActionUtc = DateTimeOffset.MinValue;
     private bool? _lastLidState;
     private string _activePowerPlanKey = string.Empty;
     private bool _startupWarmupCompleted;
@@ -2201,6 +2204,12 @@ public sealed class PowerController : IDisposable
                 _logger.Info($"检测到{manualSignalReason}，已跳过自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
                 return;
             }
+
+            if (HasRecentWakeManualContextSignal(DateTimeOffset.UtcNow))
+            {
+                _logger.Info($"检测到唤醒窗口内人工上下文信号，已跳过自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
+                return;
+            }
         }
 
         var delaySeconds = Math.Max(3, _settings.ResumeProtectionDelaySeconds);
@@ -2248,6 +2257,15 @@ public sealed class PowerController : IDisposable
                 RaiseStateChanged();
                 return;
             }
+
+            if (DateTimeOffset.UtcNow - _lastResumeProtectionActionUtc < ResumeProtectionSuppressionWindow)
+            {
+                _logger.Warn($"检测到近期恢复事件，触发频率抑制，取消本次自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
+                _lastResumeProtectionActionUtc = DateTimeOffset.UtcNow;
+                return;
+            }
+
+            _lastResumeProtectionActionUtc = DateTimeOffset.UtcNow;
 
             if (_settings.ResumeProtectionMode == ResumeProtectionMode.Hibernate)
             {
@@ -3567,6 +3585,12 @@ public sealed class PowerController : IDisposable
                 }
 
                 var analysis = AnalyzeWake(snapshot);
+                if (HasRecentManualContextSignal(resumedAtUtc, resumedAtTick))
+                {
+                    analysis = new WakeAnalysis(
+                        WakeKind.Manual,
+                        $"检测到人工上下文信号（{DescribeRecentWakeManualSignal(resumedAtUtc)}）");
+                }
 
                 if (TryGetRecentManualResumeSignal(out var manualSignalReason) && analysis.Kind != WakeKind.Manual)
                 {
@@ -3677,6 +3701,61 @@ public sealed class PowerController : IDisposable
 
         var elapsed = unchecked(lastInputInfo.dwTime - armedAtTick);
         return elapsed != 0 && elapsed < 0x80000000u;
+    }
+
+    private bool HasRecentManualContextSignal(DateTimeOffset resumedAtUtc, uint resumedAtTick)
+    {
+        if (HasUserInteractionSince(resumedAtTick))
+        {
+            return true;
+        }
+
+        return HasRecentWakeManualContextSignal(resumedAtUtc);
+    }
+
+    private bool HasRecentWakeManualContextSignal(DateTimeOffset nowUtc)
+    {
+        var manualWindow = ManualResumeCorrelationWindow;
+
+        if (_lastSessionSwitchEventUtc != DateTimeOffset.MinValue
+            && nowUtc - _lastSessionSwitchEventUtc <= manualWindow)
+        {
+            return true;
+        }
+
+        if (_lastLidStateEventUtc != DateTimeOffset.MinValue
+            && nowUtc - _lastLidStateEventUtc <= manualWindow)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private string DescribeRecentWakeManualSignal(DateTimeOffset nowUtc)
+    {
+        lock (_manualSignalSync)
+        {
+            if (_lastManualResumeSignalUtc is { } manualSignalUtc
+                && nowUtc - manualSignalUtc <= ManualResumeCorrelationWindow)
+            {
+                return _lastManualResumeSignalReason;
+            }
+        }
+
+        if (_lastSessionSwitchEventUtc != DateTimeOffset.MinValue
+            && nowUtc - _lastSessionSwitchEventUtc <= ManualResumeCorrelationWindow)
+        {
+            return "会话切换";
+        }
+
+        if (_lastLidStateEventUtc != DateTimeOffset.MinValue
+            && nowUtc - _lastLidStateEventUtc <= ManualResumeCorrelationWindow)
+        {
+            return "合盖/开盖事件";
+        }
+
+        return "人机输入";
     }
 
     private void RequestSuspend(PowerState powerState, string logMessage)

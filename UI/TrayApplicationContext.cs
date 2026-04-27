@@ -61,11 +61,11 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
 
         _followPowerPlanMenuItem = new ToolStripMenuItem("遵循电源计划");
-        _followPowerPlanMenuItem.Click += (_, _) => RunTrayAction("切换为遵循电源计划", () => _controller.SetPolicyMode(PowerPolicyMode.FollowPowerPlan));
+        _followPowerPlanMenuItem.Click += (_, _) => RunTrayActionInBackground("切换为遵循电源计划", () => _controller.SetPolicyMode(PowerPolicyMode.FollowPowerPlan));
         menu.Items.Add(_followPowerPlanMenuItem);
 
         _keepAwakeMenuItem = new ToolStripMenuItem("无限保持唤醒（类似 PowerToys Awake）");
-        _keepAwakeMenuItem.Click += (_, _) => RunTrayAction("切换为无限保持唤醒", () => _controller.SetPolicyMode(PowerPolicyMode.KeepAwakeIndefinitely));
+        _keepAwakeMenuItem.Click += (_, _) => RunTrayActionInBackground("切换为无限保持唤醒", () => _controller.SetPolicyMode(PowerPolicyMode.KeepAwakeIndefinitely));
         menu.Items.Add(_keepAwakeMenuItem);
 
         menu.Items.Add(new ToolStripSeparator());
@@ -73,7 +73,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _wakeTimersMenuItem = new ToolStripMenuItem("接管唤醒定时器");
         _wakeTimersMenuItem.Click += (_, _) =>
         {
-            RunTrayAction("切换唤醒定时器接管", () =>
+            RunTrayActionInBackground("切换唤醒定时器接管", () =>
             {
                 if (_controller.CurrentSettings.DisableWakeTimers)
                 {
@@ -90,7 +90,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _standbyConnectivityMenuItem = new ToolStripMenuItem("接管待机联网");
         _standbyConnectivityMenuItem.Click += (_, _) =>
         {
-            RunTrayAction("切换待机联网接管", () =>
+            RunTrayActionInBackground("切换待机联网接管", () =>
             {
                 if (_controller.CurrentSettings.DisableStandbyConnectivity)
                 {
@@ -107,7 +107,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _batteryFallbackMenuItem = new ToolStripMenuItem("接管电池兜底休眠");
         _batteryFallbackMenuItem.Click += (_, _) =>
         {
-            RunTrayAction("切换电池兜底休眠接管", () =>
+            RunTrayActionInBackground("切换电池兜底休眠接管", () =>
             {
                 if (_controller.CurrentSettings.EnforceBatteryStandbyHibernate)
                 {
@@ -124,7 +124,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _remoteWakeMenuItem = new ToolStripMenuItem("接管远控保活拦截");
         _remoteWakeMenuItem.Click += (_, _) =>
         {
-            RunTrayAction("切换远控保活拦截接管", () =>
+            RunTrayActionInBackground("切换远控保活拦截接管", () =>
             {
                 if (_controller.CurrentSettings.BlockKnownRemoteWakeRequests)
                 {
@@ -141,7 +141,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _rayLinkProcessStormMenuItem = new ToolStripMenuItem("RayLink 进程风暴守护");
         _rayLinkProcessStormMenuItem.Click += (_, _) =>
         {
-            RunTrayAction("切换 RayLink 进程风暴守护", () =>
+            RunTrayActionInBackground("切换 RayLink 进程风暴守护", () =>
             {
                 ToggleSetting(static settings => settings.MonitorRayLinkProcessStorm = !settings.MonitorRayLinkProcessStorm);
             });
@@ -151,7 +151,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _rayLinkSleepIsolationMenuItem = new ToolStripMenuItem("RayLink 睡眠隔离");
         _rayLinkSleepIsolationMenuItem.Click += (_, _) =>
         {
-            RunTrayAction("切换 RayLink 睡眠隔离", () =>
+            RunTrayActionInBackground("切换 RayLink 睡眠隔离", () =>
             {
                 ToggleSetting(static settings => settings.IsolateRayLinkDuringSleep = !settings.IsolateRayLinkDuringSleep);
             });
@@ -161,11 +161,11 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
 
         _startMinimizedMenuItem = new ToolStripMenuItem("启动后仅驻留托盘");
-        _startMinimizedMenuItem.Click += (_, _) => RunTrayAction("切换启动后仅驻留托盘", () => ToggleSetting(static settings => settings.StartMinimized = !settings.StartMinimized));
+        _startMinimizedMenuItem.Click += (_, _) => RunTrayActionInBackground("切换启动后仅驻留托盘", () => ToggleSetting(static settings => settings.StartMinimized = !settings.StartMinimized));
         menu.Items.Add(_startMinimizedMenuItem);
 
         _autostartMenuItem = new ToolStripMenuItem("开机自启");
-        _autostartMenuItem.Click += (_, _) => RunTrayAction("切换开机自启", () => ToggleSetting(static settings => settings.StartWithWindows = !settings.StartWithWindows));
+        _autostartMenuItem.Click += (_, _) => RunTrayActionInBackground("切换开机自启", () => ToggleSetting(static settings => settings.StartWithWindows = !settings.StartWithWindows));
         menu.Items.Add(_autostartMenuItem);
 
         menu.Items.Add(new ToolStripSeparator());
@@ -187,7 +187,7 @@ public sealed class TrayApplicationContext : ApplicationContext
                 PostToUi(() => ShowTrayBalloon($"诊断报告已导出：{path}", ToolTipIcon.Info));
             });
         });
-        menu.Items.Add("重新应用全部设置", null, (_, _) => RunTrayAction("重新应用全部设置", () => _controller.ReapplyAllManagedSettings()));
+        menu.Items.Add("重新应用全部设置", null, (_, _) => RunTrayActionInBackground("重新应用全部设置", () => _controller.ReapplyAllManagedSettings()));
 
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("立即睡眠", null, (_, _) => RunTrayAction("立即睡眠", () => _controller.SleepNow()));
