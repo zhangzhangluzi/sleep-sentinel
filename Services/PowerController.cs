@@ -95,12 +95,23 @@ public sealed class PowerController : IDisposable
     private static readonly string[] RemoteWakeIndicators =
     [
         "anydesk",
+        "anyviewer",
         "gameviewer",
+        "parsec",
         "raylink",
+        "radmin",
         "rustdesk",
+        "sunlogin",
+        "向日葵",
         "teamviewer",
         "todesk",
-        "uu远控"
+        "uu远控",
+        "logmein",
+        "vnc",
+        "nomachine",
+        "anyconnect",
+        "remmina",
+        "ultraviewer"
     ];
     private static readonly string[] NoWakeHistoryIndicators =
     [
@@ -1981,10 +1992,12 @@ public sealed class PowerController : IDisposable
 
     private void ApplyRayLinkProcessStormGuardSettings()
     {
+        var rayLinkMonitorEnabled = _settings.MonitorRayLinkProcessStorm;
+        var rayLinkIsolateEnabled = _settings.IsolateRayLinkDuringSleep;
         _rayLinkProcessStormGuard.UpdateSettings(
-            _settings.MonitorRayLinkProcessStorm || _settings.IsolateRayLinkDuringSleep,
-            _settings.AutoContainRayLinkProcessStorm,
-            _settings.IsolateRayLinkDuringSleep);
+            rayLinkMonitorEnabled || rayLinkIsolateEnabled,
+            rayLinkMonitorEnabled && _settings.AutoContainRayLinkProcessStorm,
+            rayLinkIsolateEnabled);
         _settings.RayLinkProcessStormPolicySummary = _rayLinkProcessStormGuard.CurrentSummary;
     }
 
@@ -2523,7 +2536,12 @@ public sealed class PowerController : IDisposable
 
     private static bool ContainsAny(string source, params string[] values)
     {
-        return values.Any(source.Contains);
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            return false;
+        }
+
+        return values.Any(value => source.Contains(value, StringComparison.OrdinalIgnoreCase));
     }
 
     private AppSettings CloneCurrentSettings()

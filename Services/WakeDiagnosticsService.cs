@@ -20,6 +20,7 @@ public sealed class WakeDiagnosticsService
         "power button",
         "input keyboard",
         "input mouse",
+        "open lid",
         "键盘",
         "鼠标",
         "开盖",
@@ -34,7 +35,13 @@ public sealed class WakeDiagnosticsService
         "pdc task client",
         "maintenance activator",
         "updateorchestrator",
-        "windowsupdateclient"
+        "windowsupdateclient",
+        "anydesk",
+        "teamviewer",
+        "todesk",
+        "rustdesk",
+        "gameviewer",
+        "vnc"
     ];
 
     private readonly PowerCfgService _powerCfg;
@@ -407,6 +414,11 @@ public sealed class WakeDiagnosticsService
 
     private static bool ContainsAny(string value, IEnumerable<string> indicators)
     {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
         return indicators.Any(indicator => value.Contains(indicator, StringComparison.OrdinalIgnoreCase));
     }
 
