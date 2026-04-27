@@ -36,23 +36,73 @@ jobs:
           $repo = "${{ github.repository }}"
           $notesFile = "release-notes.md"
           @"
-# SleepSentinel v$appVersion
-下载：
-- 安装版： https://github.com/$repo/releases/download/v$appVersion/SleepSentinel-Setup-v$appVersion-win-x64.exe
-- 便携版： https://github.com/$repo/releases/download/v$appVersion/SleepSentinel-v$appVersion-win-x64.exe
-"@ | Set-Content -Encoding UTF8 $notesFile
+          # SleepSentinel v$appVersion
+          下载：
+          - 安装版： https://github.com/$repo/releases/download/v$appVersion/SleepSentinel-Setup-v$appVersion-win-x64.exe
+          - 便携版： https://github.com/$repo/releases/download/v$appVersion/SleepSentinel-v$appVersion-win-x64.exe
+          "@ | Set-Content -Encoding UTF8 $notesFile
           "release_notes_file=$notesFile" >> $env:GITHUB_OUTPUT
 
       - name: Publish app
         run: dotnet publish .\SleepSentinel.csproj -c Release -r win-x64 /p:PublishSingleFile=true
 
       - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
+        id: iscc
+        shell: pwsh
+        run: |
+          if (Test-Path "${Env:ProgramFiles}\Inno Setup 6\ISCC.exe") {
+            "iscc_path=${Env:ProgramFiles}\Inno Setup 6\ISCC.exe" >> $env:GITHUB_OUTPUT
+            Write-Host "Found ISCC in Program Files."
+            exit 0
+          }
+
+          if (Test-Path "${Env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") {
+            "iscc_path=${Env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" >> $env:GITHUB_OUTPUT
+            Write-Host "Found ISCC in Program Files (x86)."
+            exit 0
+          }
+
+          if (Test-Path "${Env:LocalAppData}\Programs\Inno Setup 6\ISCC.exe") {
+            "iscc_path=${Env:LocalAppData}\Programs\Inno Setup 6\ISCC.exe" >> $env:GITHUB_OUTPUT
+            Write-Host "Found ISCC in Local AppData."
+            exit 0
+          }
+
+          Write-Host "ISCC not found, installing Inno Setup from official package."
+          $installer = Join-Path $env:TEMP "inno-setup.exe"
+          Invoke-WebRequest -Uri "https://github.com/jrsoftware/issrc/releases/download/is-6_7_1/innosetup-6.7.1.exe" -OutFile $installer -UseBasicParsing
+          Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+
+          $paths = @(
+            "${Env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "${Env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${Env:LocalAppData}\Programs\Inno Setup 6\ISCC.exe"
+          )
+          foreach ($path in $paths) {
+            if (Test-Path $path) {
+              "iscc_path=$path" >> $env:GITHUB_OUTPUT
+              exit 0
+            }
+          }
+
+          throw "ISCC installation failed: ISCC.exe not found."
 
       - name: Build installer
         shell: pwsh
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.version.outputs.app_version }}" ".\SleepSentinel.iss"
+          & "${{ steps.iscc.outputs.iscc_path }}" "/DMyAppVersion=${{ steps.version.outputs.app_version }}" ".\SleepSentinel.iss"
+
+          $portablePath = "bin/Release/net8.0-windows/win-x64/publish/${{ steps.version.outputs.portable_name }}"
+          $installerPath = "installer/${{ steps.version.outputs.installer_name }}"
+          if (-not (Test-Path $installerPath)) {
+            throw "Installer build failed: $installerPath not found."
+          }
+
+          $portableSize = (Get-Item $portablePath).Length
+          $installerSize = (Get-Item $installerPath).Length
+          if ($portableSize -eq $installerSize) {
+            throw "Installer appears invalid: size equals portable executable."
+          }
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
