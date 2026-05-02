@@ -17,10 +17,10 @@
     <Description>Windows tray utility that protects sleep and hibernate behavior from unwanted wake-ups.</Description>
     <Company>Zhang</Company>
     <Authors>Zhang</Authors>
-    <AssemblyVersion>1.0.65.0</AssemblyVersion>
-    <FileVersion>1.0.65.0</FileVersion>
-    <Version>1.0.65</Version>
-    <InformationalVersion>1.0.65</InformationalVersion>
+    <AssemblyVersion>1.0.66.0</AssemblyVersion>
+    <FileVersion>1.0.66.0</FileVersion>
+    <Version>1.0.66</Version>
+    <InformationalVersion>1.0.66</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

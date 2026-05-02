@@ -840,7 +840,6 @@ public sealed class MainForm : Form
 
         var settings = _controller.CurrentSettings;
         var statusText =
-            $"程序版本：{AppVersionInfo.DetailedDisplayVersion}{Environment.NewLine}" +
             $"当前状态：{_controller.CurrentStatus}{Environment.NewLine}" +
             $"风险提示：{_controller.CurrentRiskSummary}{Environment.NewLine}" +
             $"权限状态：{_controller.CurrentCapabilitySummary}{Environment.NewLine}" +
@@ -849,7 +848,6 @@ public sealed class MainForm : Form
         SetTextIfDifferent(_statusLabel, statusText);
 
         var detailsText =
-            $"程序版本：{AppVersionInfo.DetailedDisplayVersion}{Environment.NewLine}" +
             $"保护规则：{_controller.CurrentProtectionRuleSummary}{Environment.NewLine}" +
             $"电源计划：{_controller.CurrentPowerPlanSummary}{Environment.NewLine}" +
             $"远控名单：{_controller.CurrentManagedRemoteEntriesSummary}{Environment.NewLine}" +
