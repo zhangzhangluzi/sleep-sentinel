@@ -32,6 +32,7 @@ public sealed class DiagnosticReportService
 
         var builder = new StringBuilder();
         builder.AppendLine("SleepSentinel Diagnostic Report");
+        builder.AppendLine($"AppVersion: {AppVersionInfo.DetailedDisplayVersion}");
         builder.AppendLine($"GeneratedAt: {timestamp:yyyy-MM-dd HH:mm:ss}");
         builder.AppendLine();
         builder.AppendLine("[Settings]");

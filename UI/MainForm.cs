@@ -80,7 +80,7 @@ public sealed class MainForm : Form
         };
         _logRenderTimer.Tick += (_, _) => OnLogRenderTimerTick();
 
-        Text = "SleepSentinel";
+        Text = AppVersionInfo.WindowTitle;
         MinimumSize = new Size(MinimumWindowWidth, MinimumWindowHeight);
         StartPosition = FormStartPosition.Manual;
         Icon = _appIcon;
@@ -90,14 +90,24 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 6,
             Padding = new Padding(16)
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        var versionLabel = new Label
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold),
+            Text = $"当前运行版本：{AppVersionInfo.DetailedDisplayVersion}"
+        };
+        root.Controls.Add(versionLabel);
 
         var intro = new Label
         {
@@ -147,7 +157,7 @@ public sealed class MainForm : Form
         _onlyUnattendedWakeCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "仅在人工行为时跳过；人工包括键盘、鼠标、开盖、解锁、控制台/远程接管、登录"
+            Text = "仅在人工行为时跳过；人工包括键盘、鼠标、开盖、本地解锁/登录；远程接管默认按软件事件处理"
         };
         _onlyUnattendedWakeCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
@@ -830,6 +840,7 @@ public sealed class MainForm : Form
 
         var settings = _controller.CurrentSettings;
         var statusText =
+            $"程序版本：{AppVersionInfo.DetailedDisplayVersion}{Environment.NewLine}" +
             $"当前状态：{_controller.CurrentStatus}{Environment.NewLine}" +
             $"风险提示：{_controller.CurrentRiskSummary}{Environment.NewLine}" +
             $"权限状态：{_controller.CurrentCapabilitySummary}{Environment.NewLine}" +
@@ -838,6 +849,7 @@ public sealed class MainForm : Form
         SetTextIfDifferent(_statusLabel, statusText);
 
         var detailsText =
+            $"程序版本：{AppVersionInfo.DetailedDisplayVersion}{Environment.NewLine}" +
             $"保护规则：{_controller.CurrentProtectionRuleSummary}{Environment.NewLine}" +
             $"电源计划：{_controller.CurrentPowerPlanSummary}{Environment.NewLine}" +
             $"远控名单：{_controller.CurrentManagedRemoteEntriesSummary}{Environment.NewLine}" +
