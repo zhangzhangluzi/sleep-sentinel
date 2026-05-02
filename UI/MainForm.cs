@@ -12,6 +12,9 @@ public sealed class MainForm : Form
     private const int PreferredWindowHeight = 1180;
     private const int MaxVisibleLogLines = 400;
     private const int MaxVisibleLogCharacters = 120000;
+    private const int MaxPendingLogLines = 800;
+    private const int LogRenderDebounceMilliseconds = 120;
+    private static readonly int LogLineSeparatorLength = Environment.NewLine.Length;
     private readonly PowerController _controller;
     private readonly FileLogger _logger;
     private readonly SettingsStore _settingsStore;
@@ -53,9 +56,16 @@ public sealed class MainForm : Form
     private bool _suppressInteractiveToggleEvents;
     private bool _refreshPendingWhileHidden;
     private bool _logsDirtyWhileHidden;
+    private bool _logBatchFlushPending;
+    private readonly System.Windows.Forms.Timer _logRenderTimer;
     private int _queuedStateRefresh;
+    private int _remoteWakeSuggestionInProgress;
     private readonly SemaphoreSlim _controllerMutationGate = new(initialCount: 1);
     private int _pendingControllerMutationGeneration;
+    private readonly Queue<string> _pendingLogLines = new();
+    private readonly object _pendingLogLinesSync = new();
+    private readonly Queue<string> _visibleLogLines = new();
+    private int _visibleLogCharacters;
 
     public MainForm(PowerController controller, FileLogger logger, SettingsStore settingsStore, Icon appIcon)
     {
@@ -64,6 +74,11 @@ public sealed class MainForm : Form
         _settingsStore = settingsStore;
         _diagnosticReportService = new DiagnosticReportService(settingsStore, logger, controller);
         _appIcon = (Icon)appIcon.Clone();
+        _logRenderTimer = new System.Windows.Forms.Timer
+        {
+            Interval = LogRenderDebounceMilliseconds
+        };
+        _logRenderTimer.Tick += (_, _) => OnLogRenderTimerTick();
 
         Text = "SleepSentinel";
         MinimumSize = new Size(MinimumWindowWidth, MinimumWindowHeight);
@@ -457,6 +472,14 @@ public sealed class MainForm : Form
             _logger.LogWritten -= OnLogWritten;
             _controller.StateChanged -= _stateChangedHandler;
             _appIcon.Dispose();
+            _visibleLogLines.Clear();
+            _logRenderTimer.Stop();
+            _logRenderTimer.Dispose();
+            lock (_pendingLogLinesSync)
+            {
+                _pendingLogLines.Clear();
+                _logBatchFlushPending = false;
+            }
         }
 
         base.Dispose(disposing);
@@ -498,7 +521,43 @@ public sealed class MainForm : Form
 
     private void SuggestCustomRemoteWakeEntries()
     {
-        var suggestions = _controller.SuggestCustomRemoteWakeEntries();
+        if (Interlocked.Exchange(ref _remoteWakeSuggestionInProgress, 1) != 0)
+        {
+            MessageBox.Show("正在扫描远控候选项，请稍等。", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        _logger.Info("开始后台扫描自定义远控候选项。");
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var suggestions = _controller.SuggestCustomRemoteWakeEntries();
+                if (IsHandleCreated && !IsDisposed)
+                {
+                    BeginInvoke(new Action(() => CompleteSuggestCustomRemoteWakeEntries(suggestions)));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Error($"扫描远控候选项失败：{ex.Message}");
+                if (IsHandleCreated && !IsDisposed)
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        MessageBox.Show($"扫描远控候选项失败：{ex.Message}", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }));
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _remoteWakeSuggestionInProgress, 0);
+            }
+        });
+    }
+
+    private void CompleteSuggestCustomRemoteWakeEntries(IReadOnlyList<string> suggestions)
+    {
         if (suggestions.Count == 0)
         {
             MessageBox.Show("当前 requests / 运行进程 / 运行服务里没有发现新的远控候选项。", "SleepSentinel", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -518,12 +577,14 @@ public sealed class MainForm : Form
 
     private void ApplyControllerActionInBackground(string actionName, Action action)
     {
-        ApplyControllerMutationInBackground(actionName, action);
+        ApplyControllerMutationInBackground(actionName, action, coalesce: false);
     }
 
-    private void ApplyControllerMutationInBackground(string actionName, Action mutation)
+    private void ApplyControllerMutationInBackground(string actionName, Action mutation, bool coalesce = true)
     {
-        var generation = Interlocked.Increment(ref _pendingControllerMutationGeneration);
+        var generation = coalesce
+            ? Interlocked.Increment(ref _pendingControllerMutationGeneration)
+            : 0;
 
         _ = Task.Run(async () =>
         {
@@ -533,7 +594,7 @@ public sealed class MainForm : Form
                 await _controllerMutationGate.WaitAsync().ConfigureAwait(false);
                 gateAcquired = true;
 
-                if (generation != Volatile.Read(ref _pendingControllerMutationGeneration))
+                if (coalesce && generation != Volatile.Read(ref _pendingControllerMutationGeneration))
                 {
                     return;
                 }
@@ -632,23 +693,23 @@ public sealed class MainForm : Form
         _suppressInteractiveToggleEvents = true;
         try
         {
-            _policyModeComboBox.SelectedIndex = settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely ? 1 : 0;
-            _resumeProtectionCheckbox.Checked = settings.ResumeProtectionEnabled;
+            SetSelectedIndexIfDifferent(_policyModeComboBox, settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely ? 1 : 0);
+            SetCheckedIfDifferent(_resumeProtectionCheckbox, settings.ResumeProtectionEnabled);
             SetResumeProtectionModeOnUi(settings.ResumeProtectionMode);
-            _onlyUnattendedWakeCheckbox.Checked = settings.ResumeProtectionOnlyForUnattendedWake;
-            _resumeDelayInput.Value = Math.Clamp(settings.ResumeProtectionDelaySeconds, 3, 600);
-            _disableWakeTimersCheckbox.Checked = settings.DisableWakeTimers;
-            _disableStandbyConnectivityCheckbox.Checked = settings.DisableStandbyConnectivity;
-            _disableWiFiDirectAdaptersCheckbox.Checked = settings.DisableWiFiDirectAdapters;
-            _batteryStandbyHibernateTimeoutInput.Value = Math.Clamp(settings.BatteryStandbyHibernateTimeoutSeconds / 60, 3, 240);
-            _enforceBatteryStandbyHibernateCheckbox.Checked = settings.EnforceBatteryStandbyHibernate;
-            _blockKnownRemoteWakeCheckbox.Checked = settings.BlockKnownRemoteWakeRequests;
-            _monitorRayLinkProcessStormCheckbox.Checked = settings.MonitorRayLinkProcessStorm;
-            _autoContainRayLinkProcessStormCheckbox.Checked = settings.AutoContainRayLinkProcessStorm;
-            _isolateRayLinkDuringSleepCheckbox.Checked = settings.IsolateRayLinkDuringSleep;
-            _customRemoteWakeTextBox.Text = string.Join(Environment.NewLine, settings.CustomRemoteWakeEntries);
-            _startMinimizedCheckbox.Checked = settings.StartMinimized;
-            _autostartCheckbox.Checked = settings.StartWithWindows;
+            SetCheckedIfDifferent(_onlyUnattendedWakeCheckbox, settings.ResumeProtectionOnlyForUnattendedWake);
+            SetDecimalValueIfDifferent(_resumeDelayInput, Math.Clamp(settings.ResumeProtectionDelaySeconds, 3, 600));
+            SetCheckedIfDifferent(_disableWakeTimersCheckbox, settings.DisableWakeTimers);
+            SetCheckedIfDifferent(_disableStandbyConnectivityCheckbox, settings.DisableStandbyConnectivity);
+            SetCheckedIfDifferent(_disableWiFiDirectAdaptersCheckbox, settings.DisableWiFiDirectAdapters);
+            SetDecimalValueIfDifferent(_batteryStandbyHibernateTimeoutInput, Math.Clamp(settings.BatteryStandbyHibernateTimeoutSeconds / 60, 3, 240));
+            SetCheckedIfDifferent(_enforceBatteryStandbyHibernateCheckbox, settings.EnforceBatteryStandbyHibernate);
+            SetCheckedIfDifferent(_blockKnownRemoteWakeCheckbox, settings.BlockKnownRemoteWakeRequests);
+            SetCheckedIfDifferent(_monitorRayLinkProcessStormCheckbox, settings.MonitorRayLinkProcessStorm);
+            SetCheckedIfDifferent(_autoContainRayLinkProcessStormCheckbox, settings.AutoContainRayLinkProcessStorm);
+            SetCheckedIfDifferent(_isolateRayLinkDuringSleepCheckbox, settings.IsolateRayLinkDuringSleep);
+            SetTextIfDifferent(_customRemoteWakeTextBox, string.Join(Environment.NewLine, settings.CustomRemoteWakeEntries));
+            SetCheckedIfDifferent(_startMinimizedCheckbox, settings.StartMinimized);
+            SetCheckedIfDifferent(_autostartCheckbox, settings.StartWithWindows);
         }
         finally
         {
@@ -656,16 +717,16 @@ public sealed class MainForm : Form
         }
 
         UpdateBatteryStandbyHibernateCheckboxText();
-        _wakeTimerQuickStateLabel.Text = _controller.CurrentWakeTimerQuickState;
-        _standbyConnectivityQuickStateLabel.Text = _controller.CurrentStandbyConnectivityQuickState;
-        _wifiDirectQuickStateLabel.Text = _controller.CurrentWiFiDirectQuickState;
-        _batteryStandbyHibernateQuickStateLabel.Text = _controller.CurrentBatteryStandbyHibernateQuickState;
-        _remoteWakeQuickStateLabel.Text = _controller.CurrentRemoteWakeQuickState;
+        SetTextIfDifferent(_wakeTimerQuickStateLabel, _controller.CurrentWakeTimerQuickState);
+        SetTextIfDifferent(_standbyConnectivityQuickStateLabel, _controller.CurrentStandbyConnectivityQuickState);
+        SetTextIfDifferent(_wifiDirectQuickStateLabel, _controller.CurrentWiFiDirectQuickState);
+        SetTextIfDifferent(_batteryStandbyHibernateQuickStateLabel, _controller.CurrentBatteryStandbyHibernateQuickState);
+        SetTextIfDifferent(_remoteWakeQuickStateLabel, _controller.CurrentRemoteWakeQuickState);
         _autoContainRayLinkProcessStormCheckbox.Enabled = settings.MonitorRayLinkProcessStorm;
-        _rayLinkProcessStormQuickStateLabel.Text = _controller.CurrentRayLinkProcessStormQuickState;
-        _customRemoteWakeHintLabel.Text = settings.CustomRemoteWakeEntries.Count == 0
+        SetTextIfDifferent(_rayLinkProcessStormQuickStateLabel, _controller.CurrentRayLinkProcessStormQuickState);
+        SetTextIfDifferent(_customRemoteWakeHintLabel, settings.CustomRemoteWakeEntries.Count == 0
             ? "当前：未添加自定义条目"
-            : $"当前：{settings.CustomRemoteWakeEntries.Count} 条自定义规则";
+            : $"当前：{settings.CustomRemoteWakeEntries.Count} 条自定义规则");
     }
 
     private RadioButton CreateResumeActionRadioButton(string text)
@@ -687,6 +748,40 @@ public sealed class MainForm : Form
         };
 
         return radioButton;
+    }
+
+    private static void SetSelectedIndexIfDifferent(ComboBox comboBox, int selectedIndex)
+    {
+        if (comboBox.SelectedIndex != selectedIndex)
+        {
+            comboBox.SelectedIndex = selectedIndex;
+        }
+    }
+
+    private static void SetCheckedIfDifferent(CheckBox checkBox, bool isChecked)
+    {
+        if (checkBox.Checked != isChecked)
+        {
+            checkBox.Checked = isChecked;
+        }
+    }
+
+    private static void SetDecimalValueIfDifferent(NumericUpDown numericUpDown, decimal value)
+    {
+        if (numericUpDown.Value != value)
+        {
+            numericUpDown.Value = value;
+        }
+    }
+
+    private static void SetTextIfDifferent(Control control, string text)
+    {
+        if (string.Equals(control.Text, text, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        control.Text = text;
     }
 
     private ResumeProtectionMode GetResumeProtectionModeFromUi()
@@ -734,14 +829,15 @@ public sealed class MainForm : Form
         }
 
         var settings = _controller.CurrentSettings;
-        _statusLabel.Text =
+        var statusText =
             $"当前状态：{_controller.CurrentStatus}{Environment.NewLine}" +
             $"风险提示：{_controller.CurrentRiskSummary}{Environment.NewLine}" +
             $"权限状态：{_controller.CurrentCapabilitySummary}{Environment.NewLine}" +
             $"最近一次唤醒：{settings.LastWakeSummary}{Environment.NewLine}" +
             $"最近证据：{settings.LastWakeEvidenceSummary}";
+        SetTextIfDifferent(_statusLabel, statusText);
 
-        _detailsTextBox.Text =
+        var detailsText =
             $"保护规则：{_controller.CurrentProtectionRuleSummary}{Environment.NewLine}" +
             $"电源计划：{_controller.CurrentPowerPlanSummary}{Environment.NewLine}" +
             $"远控名单：{_controller.CurrentManagedRemoteEntriesSummary}{Environment.NewLine}" +
@@ -755,11 +851,14 @@ public sealed class MainForm : Form
             $"配置文件：{_settingsStore.SettingsPath}{Environment.NewLine}" +
             $"日志目录：{_logger.LogDirectory}{Environment.NewLine}" +
             $"上次挂起：{FormatTime(settings.LastSuspendUtc)} | 上次恢复：{FormatTime(settings.LastResumeUtc)}";
+        SetTextIfDifferent(_detailsTextBox, detailsText);
     }
 
     private void LoadLogs()
     {
-        _logTextBox.Lines = _logger.ReadRecent(MaxVisibleLogLines).ToArray();
+        _visibleLogLines.Clear();
+        _visibleLogCharacters = 0;
+        EnqueueVisibleLogLines(_logger.ReadRecent(MaxVisibleLogLines));
         _logTextBox.SelectionStart = _logTextBox.TextLength;
         _logTextBox.ScrollToCaret();
         _logsDirtyWhileHidden = false;
@@ -796,23 +895,162 @@ public sealed class MainForm : Form
             return;
         }
 
-        _logTextBox.AppendText(line + Environment.NewLine);
-        TrimVisibleLogsIfNeeded();
+        EnqueueLogLineForDisplay(line);
     }
 
-    private void TrimVisibleLogsIfNeeded()
+    private void EnqueueLogLineForDisplay(string line)
     {
-        if (_logTextBox.TextLength <= MaxVisibleLogCharacters)
+        if (IsDisposed)
         {
             return;
         }
 
-        _logTextBox.Lines = _logTextBox.Lines.TakeLast(MaxVisibleLogLines).ToArray();
-        if (_logTextBox.TextLength > MaxVisibleLogCharacters)
+        bool shouldFlush;
+        lock (_pendingLogLinesSync)
         {
-            _logTextBox.Text = _logTextBox.Text[^MaxVisibleLogCharacters..];
+            _pendingLogLines.Enqueue(line);
+            while (_pendingLogLines.Count > MaxPendingLogLines)
+            {
+                _pendingLogLines.Dequeue();
+            }
+
+            shouldFlush = !_logBatchFlushPending;
+            _logBatchFlushPending = true;
         }
 
+        if (shouldFlush)
+        {
+            ScheduleLogRender();
+        }
+    }
+
+    private void OnLogRenderTimerTick()
+    {
+        _logRenderTimer.Stop();
+        FlushPendingLogLines();
+    }
+
+    private void FlushPendingLogLines()
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        string[] lines;
+        lock (_pendingLogLinesSync)
+        {
+            if (_pendingLogLines.Count == 0)
+            {
+                _logBatchFlushPending = false;
+                return;
+            }
+
+            lines = _pendingLogLines.ToArray();
+            _pendingLogLines.Clear();
+            _logBatchFlushPending = false;
+        }
+
+        if (lines.Length == 0)
+        {
+            return;
+        }
+
+        EnqueueVisibleLogLines(lines);
+    }
+
+    private void ScheduleLogRender()
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            if (!IsHandleCreated)
+            {
+                return;
+            }
+
+            try
+            {
+                BeginInvoke(new Action(ScheduleLogRender));
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            return;
+        }
+
+        if (!_logRenderTimer.Enabled)
+        {
+            _logRenderTimer.Start();
+        }
+    }
+
+    private void EnqueueVisibleLogLines(IEnumerable<string> lines)
+    {
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrEmpty(line))
+            {
+                continue;
+            }
+
+            if (_visibleLogLines.Count > 0)
+            {
+                _visibleLogCharacters += LogLineSeparatorLength;
+            }
+
+            _visibleLogLines.Enqueue(line);
+            _visibleLogCharacters += line.Length;
+
+            while (_visibleLogLines.Count > MaxVisibleLogLines)
+            {
+                RemoveOldestVisibleLogLine();
+            }
+
+            while (_visibleLogCharacters > MaxVisibleLogCharacters && _visibleLogLines.Count > 1)
+            {
+                RemoveOldestVisibleLogLine();
+            }
+        }
+
+        RenderVisibleLogBuffer();
+    }
+
+    private void RemoveOldestVisibleLogLine()
+    {
+        if (_visibleLogLines.Count == 0)
+        {
+            _visibleLogCharacters = 0;
+            return;
+        }
+
+        var removedLine = _visibleLogLines.Dequeue();
+        _visibleLogCharacters -= removedLine.Length;
+        if (_visibleLogLines.Count > 0)
+        {
+            _visibleLogCharacters -= LogLineSeparatorLength;
+        }
+
+        if (_visibleLogCharacters < 0)
+        {
+            _visibleLogCharacters = 0;
+        }
+    }
+
+    private void RenderVisibleLogBuffer()
+    {
+        if (_visibleLogLines.Count == 0)
+        {
+            _logTextBox.Text = string.Empty;
+            return;
+        }
+
+        _logTextBox.Text = string.Join(Environment.NewLine, _visibleLogLines);
         _logTextBox.SelectionStart = _logTextBox.TextLength;
         _logTextBox.ScrollToCaret();
     }
@@ -1044,14 +1282,7 @@ public sealed class MainForm : Form
 
         try
         {
-            _settingsStore.Update(settings =>
-            {
-                settings.WindowBoundsCaptured = true;
-                settings.WindowWidth = bounds.Width;
-                settings.WindowHeight = bounds.Height;
-                settings.WindowX = bounds.X;
-                settings.WindowY = bounds.Y;
-            });
+            _controller.UpdateWindowBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height);
         }
         catch (IOException ex)
         {

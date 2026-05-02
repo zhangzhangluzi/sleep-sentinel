@@ -41,8 +41,7 @@ internal static class RemoteWakeBlockCatalog
         "vnc",
         "nomachine",
         "logmein",
-        "remotepc",
-        "anyconnect"
+        "remotepc"
     ];
 
     public static IReadOnlyList<PowerRequestOverrideEntry> BuiltInEntries { get; } =
@@ -50,6 +49,15 @@ internal static class RemoteWakeBlockCatalog
         new(PowerRequestOverrideCallerType.Process, "ToDesk.exe", "ToDesk"),
         new(PowerRequestOverrideCallerType.Process, "CoreToolsMgrHelper.exe", "ToDesk"),
         new(PowerRequestOverrideCallerType.Service, "ToDesk_Service", "ToDesk"),
+
+        new(PowerRequestOverrideCallerType.Process, "SunloginClient.exe", "向日葵 / Oray"),
+        new(PowerRequestOverrideCallerType.Process, "SunloginClient_Desktop.exe", "向日葵 / Oray"),
+        new(PowerRequestOverrideCallerType.Process, "SunloginClient_Service.exe", "向日葵 / Oray"),
+        new(PowerRequestOverrideCallerType.Process, "OrayRemoteShell.exe", "向日葵 / Oray"),
+        new(PowerRequestOverrideCallerType.Process, "OrayService.exe", "向日葵 / Oray"),
+        new(PowerRequestOverrideCallerType.Service, "SunloginService", "向日葵 / Oray"),
+        new(PowerRequestOverrideCallerType.Service, "OrayRemoteShell", "向日葵 / Oray"),
+        new(PowerRequestOverrideCallerType.Service, "OrayService", "向日葵 / Oray"),
 
         new(PowerRequestOverrideCallerType.Process, "GameViewer.exe", "GameViewer / UU远控"),
         new(PowerRequestOverrideCallerType.Process, "GameViewerLauncher.exe", "GameViewer / UU远控"),
@@ -62,6 +70,13 @@ internal static class RemoteWakeBlockCatalog
         new(PowerRequestOverrideCallerType.Process, "ad_svc.exe", "AnyDesk"),
         new(PowerRequestOverrideCallerType.Service, "AnyDesk", "AnyDesk"),
         new(PowerRequestOverrideCallerType.Process, "AnyViewer.exe", "AnyViewer"),
+        new(PowerRequestOverrideCallerType.Service, "AnyViewer", "AnyViewer"),
+
+        new(PowerRequestOverrideCallerType.Process, "RayLink.exe", "RayLink"),
+        new(PowerRequestOverrideCallerType.Process, "RayLinkService.exe", "RayLink"),
+        new(PowerRequestOverrideCallerType.Process, "RayLinkWatch.exe", "RayLink"),
+        new(PowerRequestOverrideCallerType.Process, "RayLinkCapturer.exe", "RayLink"),
+        new(PowerRequestOverrideCallerType.Service, "RayLinkService", "RayLink"),
 
         new(PowerRequestOverrideCallerType.Process, "TeamViewer.exe", "TeamViewer"),
         new(PowerRequestOverrideCallerType.Process, "TeamViewer_Service.exe", "TeamViewer"),
@@ -80,7 +95,19 @@ internal static class RemoteWakeBlockCatalog
         new(PowerRequestOverrideCallerType.Process, "winvnc.exe", "VNC"),
         new(PowerRequestOverrideCallerType.Process, "tvnserver.exe", "VNC"),
         new(PowerRequestOverrideCallerType.Service, "tvnserver", "VNC"),
-        new(PowerRequestOverrideCallerType.Process, "UltraViewer.exe", "UltraViewer")
+        new(PowerRequestOverrideCallerType.Process, "UltraViewer.exe", "UltraViewer"),
+
+        new(PowerRequestOverrideCallerType.Process, "NoMachine.exe", "NoMachine"),
+        new(PowerRequestOverrideCallerType.Process, "nxserver.exe", "NoMachine"),
+        new(PowerRequestOverrideCallerType.Service, "nxserver", "NoMachine"),
+
+        new(PowerRequestOverrideCallerType.Process, "LogMeIn.exe", "LogMeIn"),
+        new(PowerRequestOverrideCallerType.Process, "LogMeInSystray.exe", "LogMeIn"),
+        new(PowerRequestOverrideCallerType.Service, "LogMeIn", "LogMeIn"),
+
+        new(PowerRequestOverrideCallerType.Process, "RemotePC.exe", "RemotePC"),
+        new(PowerRequestOverrideCallerType.Process, "RemotePCService.exe", "RemotePC"),
+        new(PowerRequestOverrideCallerType.Service, "RemotePCService", "RemotePC")
     ];
 
     public static IReadOnlyList<PowerRequestOverrideEntry> GetManagedEntries(IEnumerable<string>? customRawEntries)

@@ -21,11 +21,13 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private const int StableWindowNormalizeThreshold = 2;
     private const int StormConsecutiveConfirmations = 2;
     private static readonly TimeSpan SleepIsolationScanPeriod = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SleepIsolationNoResumeRollbackDelay = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan SleepIsolationRestoreDelay = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan ContainmentCooldown = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan SleepIsolationActionCooldown = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ServiceStopTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan ServiceStartTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan ServiceCrashCountCacheWindow = TimeSpan.FromSeconds(45);
     private static readonly string[] RayLinkProcessNames =
     [
         "RayLink",
@@ -45,11 +47,14 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private int _consecutiveStormSamples;
     private int _restoreGeneration;
     private int _scanInProgress;
+    private int _cachedServiceCrashCount;
+    private DateTimeOffset _cachedServiceCrashCountAtUtc = DateTimeOffset.MinValue;
     private bool _enabled;
     private bool _autoContain;
     private bool _isolateDuringSleep;
     private bool _sleepIsolationActive;
     private bool _restoreRayLinkServiceAfterSleep;
+    private bool _sleepIsolationResumeObserved;
     private bool _disposed;
     private string _currentSummary = "RayLink 进程风暴守护未启用";
     private string _currentQuickState = "当前：未启用";
@@ -133,6 +138,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             {
                 _sleepIsolationActive = false;
                 _restoreRayLinkServiceAfterSleep = false;
+                _sleepIsolationResumeObserved = false;
                 _restoreGeneration++;
             }
 
@@ -144,6 +150,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                 _consecutiveStormSamples = 0;
                 _sleepIsolationActive = false;
                 _restoreRayLinkServiceAfterSleep = false;
+                _sleepIsolationResumeObserved = false;
                 _restoreGeneration++;
                 _timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
                 SetStateUnsafe("RayLink 进程风暴守护未启用", "当前：未启用");
@@ -163,6 +170,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     {
         bool enabled;
         bool isolateDuringSleep;
+        int generation;
         lock (_sync)
         {
             enabled = _enabled;
@@ -185,7 +193,8 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
 
             _sleepIsolationActive = true;
             _restoreRayLinkServiceAfterSleep |= shouldRestoreService;
-            _restoreGeneration++;
+            _sleepIsolationResumeObserved = false;
+            generation = ++_restoreGeneration;
             SetStateUnsafe(
                 $"RayLink 睡眠隔离已启用；触发：{reason}；睡眠期间会暂停并持续压制 RayLink，不禁用服务",
                 "当前：睡眠隔离中");
@@ -195,6 +204,30 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
         _logger.Warn($"RayLink 睡眠隔离启动：{reason}。将暂停 RayLink，避免睡眠期间被它反复拉起。");
         EnforceSleepIsolationIfNeeded("睡眠隔离启动");
         RaiseStateChanged();
+        ScheduleNoResumeRollback(generation, reason);
+    }
+
+    public void MarkSystemResume(string reason)
+    {
+        var shouldRaise = false;
+        lock (_sync)
+        {
+            if (_disposed || !_enabled || !_sleepIsolationActive)
+            {
+                return;
+            }
+
+            _sleepIsolationResumeObserved = true;
+            SetStateUnsafe(
+                $"RayLink 睡眠隔离保持中；已观察到系统恢复：{reason}；等待人工输入后再恢复 RayLink",
+                "当前：等待人工恢复");
+            shouldRaise = true;
+        }
+
+        if (shouldRaise)
+        {
+            RaiseStateChanged();
+        }
     }
 
     public void ScheduleRestoreAfterManualResume(string reason)
@@ -503,6 +536,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             _sleepIsolationActive = false;
             shouldStartService = _restoreRayLinkServiceAfterSleep;
             _restoreRayLinkServiceAfterSleep = false;
+            _sleepIsolationResumeObserved = false;
             _timer.Change(ScanPeriod, ScanPeriod);
         }
 
@@ -513,9 +547,55 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
         SetState($"RayLink 睡眠隔离已结束：{restoreResult}", "当前：监控中");
     }
 
-    private static RayLinkStormSnapshot CollectSnapshot(bool includeServiceCrashHistory = true)
+    private void ScheduleNoResumeRollback(int generation, string reason)
     {
-        var processes = EnumerateProcessesSafely().ToArray();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(SleepIsolationNoResumeRollbackDelay).ConfigureAwait(false);
+                CompleteNoResumeRollback(generation, reason);
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"RayLink 睡眠隔离未恢复回滚任务失败：{ex.Message}");
+            }
+        });
+    }
+
+    private void CompleteNoResumeRollback(int generation, string reason)
+    {
+        var shouldStartService = false;
+        lock (_sync)
+        {
+            if (_disposed
+                || !_enabled
+                || !_sleepIsolationActive
+                || generation != _restoreGeneration
+                || _sleepIsolationResumeObserved)
+            {
+                return;
+            }
+
+            _sleepIsolationActive = false;
+            shouldStartService = _restoreRayLinkServiceAfterSleep;
+            _restoreRayLinkServiceAfterSleep = false;
+            _sleepIsolationResumeObserved = false;
+            _timer.Change(ScanPeriod, ScanPeriod);
+        }
+
+        var restoreResult = shouldStartService
+            ? StartRayLinkService()
+            : "睡前 RayLinkService 未运行，本次不自动启动";
+        var summary = $"RayLink 睡眠隔离已自动回滚：{reason} 后 {SleepIsolationNoResumeRollbackDelay.TotalMinutes:F0} 分钟内未观察到系统恢复事件，判断本次睡眠未成立或被取消；{restoreResult}";
+        _logger.Warn(summary);
+        SetState(summary, "当前：监控中");
+        RaiseNotificationRequested("RayLink 睡眠隔离已自动回滚：未观察到真正的系统恢复事件，RayLink 已按睡前状态恢复。");
+    }
+
+    private RayLinkStormSnapshot CollectSnapshot(bool includeServiceCrashHistory = true)
+    {
+        var processes = EnumerateRayLinkManagedProcesses().ToArray();
         try
         {
             var watchCount = processes.Count(static process => IsProcessNamed(process, "RayLinkWatch"));
@@ -524,10 +604,12 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             var portConnectionCount = hasLikelyRayLinkActivity
                 ? CountLoopbackPortConnections(6511)
                 : 0;
-            var serviceCrashCount = includeServiceCrashHistory ? CountRecentServiceCrashes() : 0;
             var hasCrashCorroboratingActivity = watchCount > 1
                 || totalRayLinkCount >= ServiceCrashCorroboratingProcessThreshold
                 || portConnectionCount >= ServiceCrashCorroboratingPortThreshold;
+            var serviceCrashCount = includeServiceCrashHistory && hasCrashCorroboratingActivity
+                ? GetRecentServiceCrashCount()
+                : 0;
             var isStorm = watchCount >= WatchProcessStormThreshold
                 || totalRayLinkCount >= TotalProcessStormThreshold
                 || portConnectionCount >= PortConnectionStormThreshold
@@ -566,7 +648,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     {
         var killedCount = 0;
         var failures = new List<string>();
-        var processes = EnumerateProcessesSafely().ToArray();
+        var processes = EnumerateRayLinkManagedProcesses().ToArray();
         foreach (var process in processes)
         {
             using (process)
@@ -663,14 +745,14 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
         }
     }
 
-    private static bool HasRayLinkActivity()
+    private bool HasRayLinkActivity()
     {
         if (IsRayLinkServiceRunning())
         {
             return true;
         }
 
-        var processes = EnumerateProcessesSafely().ToArray();
+        var processes = EnumerateRayLinkManagedProcesses().ToArray();
         try
         {
             return processes.Any(IsRayLinkManagedProcess) || CountLoopbackPortConnections(6511) > 0;
@@ -682,6 +764,27 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                 process.Dispose();
             }
         }
+    }
+
+    private int GetRecentServiceCrashCount()
+    {
+        var now = DateTimeOffset.UtcNow;
+        lock (_sync)
+        {
+            if (now - _cachedServiceCrashCountAtUtc <= ServiceCrashCountCacheWindow)
+            {
+                return _cachedServiceCrashCount;
+            }
+        }
+
+        var count = CountRecentServiceCrashes();
+        lock (_sync)
+        {
+            _cachedServiceCrashCount = count;
+            _cachedServiceCrashCountAtUtc = now;
+        }
+
+        return count;
     }
 
     private void SetState(string summary, string quickState)
@@ -711,14 +814,68 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
         return true;
     }
 
-    private static IEnumerable<Process> EnumerateProcessesSafely()
+    private static IEnumerable<Process> GetProcessesByNameSafely(string processName)
     {
         try
         {
-            return Process.GetProcesses();
+            return Process.GetProcessesByName(processName);
         }
         catch
         {
+            return [];
+        }
+    }
+
+    private static IEnumerable<Process> EnumerateRayLinkManagedProcesses()
+    {
+        var collected = new List<Process>();
+
+        try
+        {
+            foreach (var processName in RayLinkProcessNames)
+            {
+                collected.AddRange(GetProcessesByNameSafely(processName));
+            }
+
+            foreach (var process in GetProcessesByNameSafely("speedtest"))
+            {
+                if (IsUnderRayLinkDirectory(process))
+                {
+                    collected.Add(process);
+                }
+                else
+                {
+                    process.Dispose();
+                }
+            }
+
+            if (collected.Count <= 1)
+            {
+                return collected;
+            }
+
+            var deduplicated = new Dictionary<int, Process>();
+            foreach (var process in collected)
+            {
+                var processId = SafeProcessId(process);
+                if (processId == 0 || deduplicated.ContainsKey(processId))
+                {
+                    process.Dispose();
+                    continue;
+                }
+
+                deduplicated[processId] = process;
+            }
+
+            return deduplicated.Values.ToList();
+        }
+        catch
+        {
+            foreach (var process in collected)
+            {
+                process.Dispose();
+            }
+
             return [];
         }
     }

@@ -16,7 +16,7 @@ public sealed class PowerController : IDisposable
     private static readonly TimeSpan ResumeEventDebounceWindow = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan SessionSwitchEventDebounceWindow = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan LidEventDebounceWindow = TimeSpan.FromSeconds(3);
-    private static readonly TimeSpan StatusSnapshotMaxAge = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan StatusSnapshotMaxAge = TimeSpan.FromSeconds(30);
     private const int ResumeAnalysisDelayMilliseconds = 1800;
     private const int DefaultBatteryStandbyHibernateTimeoutSeconds = 600;
     private const int PowerShellTimeoutMilliseconds = 10000;
@@ -106,10 +106,12 @@ public sealed class PowerController : IDisposable
         "teamviewer",
         "todesk",
         "uu远控",
+        "oray",
         "logmein",
         "vnc",
         "nomachine",
-        "anyconnect",
+        "remotepc",
+        "splashtop",
         "remmina",
         "ultraviewer"
     ];
@@ -159,6 +161,7 @@ public sealed class PowerController : IDisposable
     private DateTimeOffset _lastResumeModeEventUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastSuspendModeEventUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastSessionSwitchEventUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastRemoteSessionSwitchEventUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastLidStateEventUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastResumeProtectionActionUtc = DateTimeOffset.MinValue;
     private bool? _lastLidState;
@@ -213,52 +216,7 @@ public sealed class PowerController : IDisposable
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
         SystemEvents.SessionSwitch += OnSessionSwitch;
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
-        ApplyPolicy(_settings.PolicyMode);
-        if (_settings.DisableWakeTimers)
-        {
-            CaptureWakeTimerRestoreSnapshotIfNeeded();
-            ApplyWakeTimerPolicy();
-        }
-        else
-        {
-            _settings.WakeTimerPolicySummary = "未由应用接管；启动时跳过即时核验";
-        }
-        if (_settings.DisableStandbyConnectivity)
-        {
-            CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
-            ApplyStandbyConnectivityPolicy();
-        }
-        else
-        {
-            _settings.StandbyConnectivityPolicySummary = "未由应用接管；启动时跳过即时核验";
-        }
-        if (_settings.DisableWiFiDirectAdapters)
-        {
-            CaptureWiFiDirectAdapterRestoreSnapshotIfNeeded();
-            ApplyWiFiDirectAdapterPolicy();
-        }
-        else
-        {
-            _settings.WiFiDirectAdapterPolicySummary = "未由应用接管；启动时跳过即时核验";
-        }
-        if (_settings.EnforceBatteryStandbyHibernate)
-        {
-            CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
-            ApplyBatteryStandbyHibernatePolicy();
-        }
-        else
-        {
-            _settings.BatteryStandbyHibernatePolicySummary = "未由应用接管；启动时跳过即时核验";
-        }
-        if (_settings.BlockKnownRemoteWakeRequests)
-        {
-            CaptureKnownRemoteWakeRestoreSnapshotIfNeeded();
-            ApplyKnownRemoteWakePolicy();
-        }
-        else
-        {
-            _settings.KnownRemoteWakePolicySummary = "未由应用接管；启动时跳过即时核验";
-        }
+        InitializeDeferredStartupPolicySummaries();
         ApplyRayLinkProcessStormGuardSettings();
         _settings.AutostartPolicySummary = _settings.StartWithWindows
             ? "开机自启已启用；启动时跳过即时核验"
@@ -266,6 +224,25 @@ public sealed class PowerController : IDisposable
         SaveSettingsSnapshot();
         InvalidateStatusSnapshot();
         _logger.Info($"应用启动，当前模式：{DescribeMode(_settings.PolicyMode)}。");
+    }
+
+    private void InitializeDeferredStartupPolicySummaries()
+    {
+        _settings.WakeTimerPolicySummary = _settings.DisableWakeTimers
+            ? "已接管；启动后将在后台应用并核验"
+            : "未由应用接管；启动时跳过即时核验";
+        _settings.StandbyConnectivityPolicySummary = _settings.DisableStandbyConnectivity
+            ? "已接管；启动后将在后台应用并核验"
+            : "未由应用接管；启动时跳过即时核验";
+        _settings.WiFiDirectAdapterPolicySummary = _settings.DisableWiFiDirectAdapters
+            ? "已接管；启动后将在后台应用并核验"
+            : "未由应用接管；启动时跳过即时核验";
+        _settings.BatteryStandbyHibernatePolicySummary = _settings.EnforceBatteryStandbyHibernate
+            ? "已接管；启动后将在后台应用并核验"
+            : "未由应用接管；启动时跳过即时核验";
+        _settings.KnownRemoteWakePolicySummary = _settings.BlockKnownRemoteWakeRequests
+            ? "已接管；启动后将在后台应用并核验"
+            : "未由应用接管；启动时跳过即时核验";
     }
 
     public event EventHandler? StateChanged;
@@ -429,6 +406,7 @@ public sealed class PowerController : IDisposable
 
     public void SetPolicyMode(PowerPolicyMode mode)
     {
+        bool shouldApply;
         lock (_stateSync)
         {
             if (_settings.PolicyMode == mode)
@@ -436,138 +414,318 @@ public sealed class PowerController : IDisposable
                 return;
             }
 
-            ApplyPolicyModeChangeOnly(mode);
+            _settings.PolicyMode = mode;
+            EnsureSettingsDefaults();
+            SaveSettingsSnapshot();
+            InvalidateStatusSnapshot();
+            shouldApply = true;
+        }
+
+        if (shouldApply)
+        {
+            CancelPendingResumeProtection();
+            CancelPendingResumeEvaluation();
+            ApplyPolicy(mode);
+            _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}。");
+            RaiseStateChanged();
         }
     }
 
     public void UpdateSettings(AppSettings updatedSettings)
     {
+        IReadOnlyList<PowerRequestOverrideEntry> previousManagedRemoteEntries = [];
+        IReadOnlyList<PowerRequestOverrideEntry> currentManagedRemoteEntries = [];
+        var planChangedPolicyMode = false;
+        var planApplyPolicy = false;
+        var planApplyWakeTimerPolicy = false;
+        var planCaptureWakeTimerSnapshot = false;
+        var planRestoreWakeTimerPolicy = false;
+        var planRefreshWakeTimerSummary = false;
+        var planApplyStandbyConnectivityPolicy = false;
+        var planCaptureStandbyConnectivitySnapshot = false;
+        var planRestoreStandbyConnectivityPolicy = false;
+        var planRefreshStandbyConnectivitySummary = false;
+        var planApplyWiFiDirectAdapterPolicy = false;
+        var planCaptureWiFiDirectSnapshot = false;
+        var planRestoreWiFiDirectAdapterPolicy = false;
+        var planRefreshWiFiDirectSummary = false;
+        var planApplyBatteryStandbyHibernatePolicy = false;
+        var planCaptureBatteryStandbyHibernateSnapshot = false;
+        var planRestoreBatteryStandbyHibernatePolicy = false;
+        var planRefreshBatteryStandbyHibernateSummary = false;
+        var planCaptureKnownRemoteWakeSnapshot = false;
+        var planReconcileKnownRemoteWake = false;
+        var planRestoreKnownRemoteWakePolicy = false;
+        var planApplyKnownRemoteWakePolicy = false;
+        var planRefreshKnownRemoteWakeSummary = false;
+        var planApplyRayLinkProcessStormGuardSettings = false;
+        var planEnsureAutostartMatchesSettings = false;
+        var cancelPendingProtection = false;
+        var cancelPendingEvaluation = false;
+        var shouldNotify = false;
+        bool onlyPolicyMode = false;
+
         lock (_stateSync)
         {
             var previousSettings = _settings;
             if (HasOnlyPolicyModeChanged(previousSettings, updatedSettings))
             {
-                ApplyPolicyModeChangeOnly(updatedSettings.PolicyMode);
-                return;
+                if (_settings.PolicyMode != updatedSettings.PolicyMode)
+                {
+                    _settings.PolicyMode = updatedSettings.PolicyMode;
+                    EnsureSettingsDefaults();
+                    InvalidateStatusSnapshot();
+                    SaveSettingsSnapshot();
+                    planChangedPolicyMode = true;
+                    planApplyPolicy = true;
+                    onlyPolicyMode = true;
+                }
+
+                shouldNotify = true;
+                _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}。");
+                goto Exit;
             }
 
             InvalidateStatusSnapshot();
-            CancelPendingResumeProtection();
-            CancelPendingResumeEvaluation();
-            var previousManagedRemoteEntries = RemoteWakeBlockCatalog.GetManagedEntries(previousSettings.CustomRemoteWakeEntries);
+            cancelPendingProtection = true;
+            cancelPendingEvaluation = true;
+            previousManagedRemoteEntries = RemoteWakeBlockCatalog.GetManagedEntries(previousSettings.CustomRemoteWakeEntries);
             _settings = updatedSettings;
             EnsureSettingsDefaults();
             SaveSettingsSnapshot();
-            ApplyPolicy(_settings.PolicyMode);
+
+            planApplyPolicy = true;
+
             if (_settings.DisableWakeTimers)
             {
-                if (!previousSettings.DisableWakeTimers)
-                {
-                    CaptureWakeTimerRestoreSnapshotIfNeeded();
-                }
-
-                ApplyWakeTimerPolicy();
+                planCaptureWakeTimerSnapshot = !previousSettings.DisableWakeTimers;
+                planApplyWakeTimerPolicy = true;
             }
             else if (previousSettings.DisableWakeTimers)
             {
-                RestoreWakeTimerPolicy();
+                planRestoreWakeTimerPolicy = true;
             }
             else
             {
-                RefreshWakeTimerPolicySummary(persistSnapshot: false);
+                planRefreshWakeTimerSummary = true;
             }
+
             if (_settings.DisableStandbyConnectivity)
             {
-                if (!previousSettings.DisableStandbyConnectivity)
-                {
-                    CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
-                }
-
-                ApplyStandbyConnectivityPolicy();
+                planCaptureStandbyConnectivitySnapshot = !previousSettings.DisableStandbyConnectivity;
+                planApplyStandbyConnectivityPolicy = true;
             }
             else if (previousSettings.DisableStandbyConnectivity)
             {
-                RestoreStandbyConnectivityPolicy();
+                planRestoreStandbyConnectivityPolicy = true;
             }
             else
             {
-                RefreshStandbyConnectivityPolicySummary(persistSnapshot: false);
+                planRefreshStandbyConnectivitySummary = true;
             }
+
             if (_settings.DisableWiFiDirectAdapters)
             {
-                if (!previousSettings.DisableWiFiDirectAdapters)
-                {
-                    CaptureWiFiDirectAdapterRestoreSnapshotIfNeeded();
-                }
-
-                ApplyWiFiDirectAdapterPolicy();
+                planCaptureWiFiDirectSnapshot = !previousSettings.DisableWiFiDirectAdapters;
+                planApplyWiFiDirectAdapterPolicy = true;
             }
             else if (previousSettings.DisableWiFiDirectAdapters)
             {
-                RestoreWiFiDirectAdapterPolicy();
+                planRestoreWiFiDirectAdapterPolicy = true;
             }
             else
             {
-                RefreshWiFiDirectAdapterPolicySummary(persistSnapshot: false);
+                planRefreshWiFiDirectSummary = true;
             }
+
             if (_settings.EnforceBatteryStandbyHibernate)
             {
-                if (!previousSettings.EnforceBatteryStandbyHibernate)
-                {
-                    CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
-                }
-
-                ApplyBatteryStandbyHibernatePolicy();
+                planCaptureBatteryStandbyHibernateSnapshot = !previousSettings.EnforceBatteryStandbyHibernate;
+                planApplyBatteryStandbyHibernatePolicy = true;
             }
             else if (previousSettings.EnforceBatteryStandbyHibernate)
             {
-                RestoreBatteryStandbyHibernatePolicy();
+                planRestoreBatteryStandbyHibernatePolicy = true;
             }
             else
             {
-                RefreshBatteryStandbyHibernatePolicySummary(persistSnapshot: false);
+                planRefreshBatteryStandbyHibernateSummary = true;
             }
+
             if (_settings.BlockKnownRemoteWakeRequests)
             {
-                var currentManagedRemoteEntries = RemoteWakeBlockCatalog.GetManagedEntries(_settings.CustomRemoteWakeEntries);
+                currentManagedRemoteEntries = RemoteWakeBlockCatalog.GetManagedEntries(_settings.CustomRemoteWakeEntries);
                 if (!previousSettings.BlockKnownRemoteWakeRequests)
                 {
-                    CaptureKnownRemoteWakeRestoreSnapshotIfNeeded(currentManagedRemoteEntries);
+                    planCaptureKnownRemoteWakeSnapshot = true;
                 }
                 else
                 {
-                    ReconcileKnownRemoteWakeManagedEntries(previousManagedRemoteEntries, currentManagedRemoteEntries);
+                    planReconcileKnownRemoteWake = true;
                 }
 
-                ApplyKnownRemoteWakePolicy(currentManagedRemoteEntries);
+                planApplyKnownRemoteWakePolicy = true;
             }
             else if (previousSettings.BlockKnownRemoteWakeRequests)
             {
-                RestoreKnownRemoteWakePolicy(previousManagedRemoteEntries);
+                planRestoreKnownRemoteWakePolicy = true;
             }
             else
             {
-                RefreshKnownRemoteWakePolicySummary(persistSnapshot: false);
+                planRefreshKnownRemoteWakeSummary = true;
             }
-            ApplyRayLinkProcessStormGuardSettings();
-            EnsureAutostartMatchesSettings();
-            SaveSettingsSnapshot();
+
+            planApplyRayLinkProcessStormGuardSettings = true;
+            planEnsureAutostartMatchesSettings = true;
+            shouldNotify = true;
             InvalidateStatusSnapshot();
             _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}，恢复保护={_settings.ResumeProtectionEnabled}，待机联网拦截={_settings.DisableStandbyConnectivity}，Wi-Fi Direct 禁用={_settings.DisableWiFiDirectAdapters}，电池兜底休眠={_settings.EnforceBatteryStandbyHibernate}（{DescribePowerSettingDuration(GetBatteryStandbyHibernateTimeoutSeconds())}），远控拦截={_settings.BlockKnownRemoteWakeRequests}，RayLink风暴守护={_settings.MonitorRayLinkProcessStorm}/{_settings.AutoContainRayLinkProcessStorm}，RayLink睡眠隔离={_settings.IsolateRayLinkDuringSleep}，自定义远控={_settings.CustomRemoteWakeEntries.Count} 条。");
-            RaiseStateChanged();
         }
-    }
 
-    private void ApplyPolicyModeChangeOnly(PowerPolicyMode mode)
-    {
-        CancelPendingResumeProtection();
-        CancelPendingResumeEvaluation();
-        _settings.PolicyMode = mode;
-        EnsureSettingsDefaults();
+        Exit:
+
+        if (!shouldNotify)
+        {
+            return;
+        }
+
+        if (onlyPolicyMode)
+        {
+            if (planChangedPolicyMode && planApplyPolicy)
+            {
+                CancelPendingResumeProtection();
+                CancelPendingResumeEvaluation();
+                ApplyPolicy(_settings.PolicyMode);
+            }
+
+            if (planApplyPolicy)
+            {
+                RaiseStateChanged();
+            }
+
+            return;
+        }
+
+        if (cancelPendingProtection)
+        {
+            CancelPendingResumeProtection();
+        }
+
+        if (cancelPendingEvaluation)
+        {
+            CancelPendingResumeEvaluation();
+        }
+
+        if (planApplyPolicy)
+        {
+            ApplyPolicy(_settings.PolicyMode);
+        }
+
+        if (planCaptureWakeTimerSnapshot)
+        {
+            CaptureWakeTimerRestoreSnapshotIfNeeded();
+        }
+
+        if (planApplyWakeTimerPolicy)
+        {
+            ApplyWakeTimerPolicy();
+        }
+        else if (planRestoreWakeTimerPolicy)
+        {
+            RestoreWakeTimerPolicy();
+        }
+        else if (planRefreshWakeTimerSummary)
+        {
+            RefreshWakeTimerPolicySummary(persistSnapshot: false);
+        }
+
+        if (planCaptureStandbyConnectivitySnapshot)
+        {
+            CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
+        }
+
+        if (planApplyStandbyConnectivityPolicy)
+        {
+            ApplyStandbyConnectivityPolicy();
+        }
+        else if (planRestoreStandbyConnectivityPolicy)
+        {
+            RestoreStandbyConnectivityPolicy();
+        }
+        else if (planRefreshStandbyConnectivitySummary)
+        {
+            RefreshStandbyConnectivityPolicySummary(persistSnapshot: false);
+        }
+
+        if (planCaptureWiFiDirectSnapshot)
+        {
+            CaptureWiFiDirectAdapterRestoreSnapshotIfNeeded();
+        }
+
+        if (planApplyWiFiDirectAdapterPolicy)
+        {
+            ApplyWiFiDirectAdapterPolicy();
+        }
+        else if (planRestoreWiFiDirectAdapterPolicy)
+        {
+            RestoreWiFiDirectAdapterPolicy();
+        }
+        else if (planRefreshWiFiDirectSummary)
+        {
+            RefreshWiFiDirectAdapterPolicySummary(persistSnapshot: false);
+        }
+
+        if (planCaptureBatteryStandbyHibernateSnapshot)
+        {
+            CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
+        }
+
+        if (planApplyBatteryStandbyHibernatePolicy)
+        {
+            ApplyBatteryStandbyHibernatePolicy();
+        }
+        else if (planRestoreBatteryStandbyHibernatePolicy)
+        {
+            RestoreBatteryStandbyHibernatePolicy();
+        }
+        else if (planRefreshBatteryStandbyHibernateSummary)
+        {
+            RefreshBatteryStandbyHibernatePolicySummary(persistSnapshot: false);
+        }
+
+        if (planCaptureKnownRemoteWakeSnapshot)
+        {
+            CaptureKnownRemoteWakeRestoreSnapshotIfNeeded(currentManagedRemoteEntries);
+        }
+        if (planReconcileKnownRemoteWake)
+        {
+            ReconcileKnownRemoteWakeManagedEntries(previousManagedRemoteEntries, currentManagedRemoteEntries);
+        }
+        if (planApplyKnownRemoteWakePolicy)
+        {
+            ApplyKnownRemoteWakePolicy(currentManagedRemoteEntries);
+        }
+        else if (planRestoreKnownRemoteWakePolicy)
+        {
+            RestoreKnownRemoteWakePolicy(previousManagedRemoteEntries);
+        }
+        else if (planRefreshKnownRemoteWakeSummary)
+        {
+            RefreshKnownRemoteWakePolicySummary(persistSnapshot: false);
+        }
+
+        if (planApplyRayLinkProcessStormGuardSettings)
+        {
+            ApplyRayLinkProcessStormGuardSettings();
+        }
+
+        if (planEnsureAutostartMatchesSettings)
+        {
+            EnsureAutostartMatchesSettings();
+        }
+
         SaveSettingsSnapshot();
-        ApplyPolicy(_settings.PolicyMode);
         InvalidateStatusSnapshot();
-        _logger.Info($"设置已更新：模式={DescribeMode(_settings.PolicyMode)}。");
         RaiseStateChanged();
     }
 
@@ -602,8 +760,9 @@ public sealed class PowerController : IDisposable
         {
             InvalidateStatusSnapshot();
             CancelPendingResumeProtection($"用户手动操作，已取消待执行的自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
-            RequestSuspend(PowerState.Suspend, "用户手动请求立即睡眠。");
         }
+
+        RequestSuspend(PowerState.Suspend, "用户手动请求立即睡眠。");
     }
 
     public void HibernateNow()
@@ -612,8 +771,9 @@ public sealed class PowerController : IDisposable
         {
             InvalidateStatusSnapshot();
             CancelPendingResumeProtection($"用户手动操作，已取消待执行的自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
-            RequestSuspend(PowerState.Hibernate, "用户手动请求立即休眠。");
         }
+
+        RequestSuspend(PowerState.Hibernate, "用户手动请求立即休眠。");
     }
 
     public string CollectWakeDiagnostics()
@@ -656,83 +816,118 @@ public sealed class PowerController : IDisposable
 
     public void UpdateCustomRemoteWakeEntries(IEnumerable<string> rawEntries)
     {
+        InvalidateStatusSnapshot();
+        var normalized = RemoteWakeBlockCatalog.NormalizeCustomEntries(rawEntries);
+        var currentSettings = CloneCurrentSettings();
+        if (currentSettings.CustomRemoteWakeEntries.SequenceEqual(normalized, StringComparer.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var updatedSettings = currentSettings;
+        updatedSettings.CustomRemoteWakeEntries = normalized.ToList();
+        _logger.Info(normalized.Count == 0
+            ? "已清空自定义远控拦截名单。"
+            : $"已更新自定义远控拦截名单，共 {normalized.Count} 条。");
+        UpdateSettings(updatedSettings);
+    }
+
+    public void UpdateWindowBounds(int x, int y, int width, int height)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        var shouldSave = false;
         lock (_stateSync)
         {
-            InvalidateStatusSnapshot();
-            var normalized = RemoteWakeBlockCatalog.NormalizeCustomEntries(rawEntries);
-            if (_settings.CustomRemoteWakeEntries.SequenceEqual(normalized, StringComparer.OrdinalIgnoreCase))
+            if (_settings.WindowBoundsCaptured
+                && _settings.WindowX == x
+                && _settings.WindowY == y
+                && _settings.WindowWidth == width
+                && _settings.WindowHeight == height)
             {
                 return;
             }
 
-            var updatedSettings = CloneCurrentSettings();
-            updatedSettings.CustomRemoteWakeEntries = normalized.ToList();
-            _logger.Info(normalized.Count == 0
-                ? "已清空自定义远控拦截名单。"
-                : $"已更新自定义远控拦截名单，共 {normalized.Count} 条。");
-            UpdateSettings(updatedSettings);
+            _settings.WindowBoundsCaptured = true;
+            _settings.WindowX = x;
+            _settings.WindowY = y;
+            _settings.WindowWidth = width;
+            _settings.WindowHeight = height;
+            shouldSave = true;
+        }
+
+        if (shouldSave)
+        {
+            SaveSettingsSnapshot();
         }
     }
 
     public void ReapplyAllManagedSettings()
     {
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        CancelPendingResumeProtection();
+        ApplyPolicy(settings.PolicyMode);
+
+        if (settings.DisableWakeTimers)
         {
-            InvalidateStatusSnapshot();
-            CancelPendingResumeProtection();
-            ApplyPolicy(_settings.PolicyMode);
-
-            if (_settings.DisableWakeTimers)
-            {
-                ApplyWakeTimerPolicy();
-            }
-            else
-            {
-                RefreshWakeTimerPolicySummary(persistSnapshot: false);
-            }
-
-            if (_settings.DisableStandbyConnectivity)
-            {
-                ApplyStandbyConnectivityPolicy();
-            }
-            else
-            {
-                RefreshStandbyConnectivityPolicySummary(persistSnapshot: false);
-            }
-
-            if (_settings.DisableWiFiDirectAdapters)
-            {
-                ApplyWiFiDirectAdapterPolicy();
-            }
-            else
-            {
-                RefreshWiFiDirectAdapterPolicySummary(persistSnapshot: false);
-            }
-
-            if (_settings.EnforceBatteryStandbyHibernate)
-            {
-                ApplyBatteryStandbyHibernatePolicy();
-            }
-            else
-            {
-                RefreshBatteryStandbyHibernatePolicySummary(persistSnapshot: false);
-            }
-
-            if (_settings.BlockKnownRemoteWakeRequests)
-            {
-                ApplyKnownRemoteWakePolicy();
-            }
-            else
-            {
-                RefreshKnownRemoteWakePolicySummary(persistSnapshot: false);
-            }
-
-            ApplyRayLinkProcessStormGuardSettings();
-            EnsureAutostartMatchesSettings();
-            SaveSettingsSnapshot();
-            _logger.Info("已重新应用当前全部设置。");
-            RaiseStateChanged();
+            CaptureWakeTimerRestoreSnapshotIfNeeded();
+            ApplyWakeTimerPolicy();
         }
+        else
+        {
+            RefreshWakeTimerPolicySummary(persistSnapshot: false);
+        }
+
+        if (settings.DisableStandbyConnectivity)
+        {
+            CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
+            ApplyStandbyConnectivityPolicy();
+        }
+        else
+        {
+            RefreshStandbyConnectivityPolicySummary(persistSnapshot: false);
+        }
+
+        if (settings.DisableWiFiDirectAdapters)
+        {
+            CaptureWiFiDirectAdapterRestoreSnapshotIfNeeded();
+            ApplyWiFiDirectAdapterPolicy();
+        }
+        else
+        {
+            RefreshWiFiDirectAdapterPolicySummary(persistSnapshot: false);
+        }
+
+        if (settings.EnforceBatteryStandbyHibernate)
+        {
+            CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
+            ApplyBatteryStandbyHibernatePolicy();
+        }
+        else
+        {
+            RefreshBatteryStandbyHibernatePolicySummary(persistSnapshot: false);
+        }
+
+        if (settings.BlockKnownRemoteWakeRequests)
+        {
+            var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(settings.CustomRemoteWakeEntries);
+            CaptureKnownRemoteWakeRestoreSnapshotIfNeeded(managedEntries);
+            ApplyKnownRemoteWakePolicy(managedEntries);
+        }
+        else
+        {
+            RefreshKnownRemoteWakePolicySummary(persistSnapshot: false);
+        }
+
+        ApplyRayLinkProcessStormGuardSettings();
+        EnsureAutostartMatchesSettings();
+        SaveSettingsSnapshot();
+        _logger.Info("已重新应用当前全部设置。");
+        RaiseStateChanged();
     }
 
     public void CompleteDeferredStartupValidation()
@@ -751,14 +946,9 @@ public sealed class PowerController : IDisposable
 
         try
         {
-            _logger.Info("正在补全启动后的延迟状态校验。");
+            _logger.Info("正在后台应用并补全启动后的状态校验。");
 
-            if (!TryRunDeferredStartupRefresh(static controller => controller.RefreshWakeTimerPolicySummary(persistSnapshot: false))
-                || !TryRunDeferredStartupRefresh(static controller => controller.RefreshStandbyConnectivityPolicySummary(persistSnapshot: false))
-                || !TryRunDeferredStartupRefresh(static controller => controller.RefreshWiFiDirectAdapterPolicySummary(persistSnapshot: false))
-                || !TryRunDeferredStartupRefresh(static controller => controller.RefreshBatteryStandbyHibernatePolicySummary(persistSnapshot: false))
-                || !TryRunDeferredStartupRefresh(static controller => controller.RefreshKnownRemoteWakePolicySummary(persistSnapshot: false))
-                || !TryRunDeferredStartupRefresh(static controller => controller.EnsureAutostartMatchesSettings()))
+            if (!TryRunDeferredStartupRefresh(static controller => controller.ApplyStartupManagedSettings()))
             {
                 return;
             }
@@ -792,39 +982,38 @@ public sealed class PowerController : IDisposable
 
     public void ReapplyWakeTimerPolicy()
     {
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (settings.DisableWakeTimers)
         {
-            InvalidateStatusSnapshot();
-            if (_settings.DisableWakeTimers)
-            {
-                ApplyWakeTimerPolicy();
-            }
-            else
-            {
-                RefreshWakeTimerPolicySummary(persistSnapshot: false);
-                _logger.Info(_settings.WakeTimerPolicySummary);
-            }
-
-            SaveSettingsSnapshot();
+            CaptureWakeTimerRestoreSnapshotIfNeeded();
+            ApplyWakeTimerPolicy();
         }
+        else
+        {
+            RefreshWakeTimerPolicySummary(persistSnapshot: false);
+            _logger.Info(_settings.WakeTimerPolicySummary);
+        }
+
+        SaveSettingsSnapshot();
 
         RaiseStateChanged();
     }
 
     public void ReapplyKnownRemoteWakePolicy()
     {
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (settings.BlockKnownRemoteWakeRequests)
         {
-            InvalidateStatusSnapshot();
-            if (_settings.BlockKnownRemoteWakeRequests)
-            {
-                ApplyKnownRemoteWakePolicy();
-            }
-            else
-            {
-                RefreshKnownRemoteWakePolicySummary(persistSnapshot: false);
-                SaveSettingsSnapshot();
-            }
+            var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(settings.CustomRemoteWakeEntries);
+            CaptureKnownRemoteWakeRestoreSnapshotIfNeeded(managedEntries);
+            ApplyKnownRemoteWakePolicy(managedEntries);
+        }
+        else
+        {
+            RefreshKnownRemoteWakePolicySummary(persistSnapshot: false);
+            SaveSettingsSnapshot();
         }
 
         RaiseStateChanged();
@@ -832,20 +1021,18 @@ public sealed class PowerController : IDisposable
 
     public void ReapplyStandbyConnectivityPolicy()
     {
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (settings.DisableStandbyConnectivity)
         {
-            InvalidateStatusSnapshot();
-            if (_settings.DisableStandbyConnectivity)
-            {
-                ApplyStandbyConnectivityPolicy();
-            }
-            else
-            {
-                RefreshStandbyConnectivityPolicySummary(persistSnapshot: false);
-                SaveSettingsSnapshot();
-                _logger.Info(_settings.StandbyConnectivityPolicySummary);
-            }
-
+            CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
+            ApplyStandbyConnectivityPolicy();
+        }
+        else
+        {
+            RefreshStandbyConnectivityPolicySummary(persistSnapshot: false);
+            SaveSettingsSnapshot();
+            _logger.Info(_settings.StandbyConnectivityPolicySummary);
         }
 
         RaiseStateChanged();
@@ -853,19 +1040,18 @@ public sealed class PowerController : IDisposable
 
     public void ReapplyWiFiDirectAdapterPolicy()
     {
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (settings.DisableWiFiDirectAdapters)
         {
-            InvalidateStatusSnapshot();
-            if (_settings.DisableWiFiDirectAdapters)
-            {
-                ApplyWiFiDirectAdapterPolicy();
-            }
-            else
-            {
-                RefreshWiFiDirectAdapterPolicySummary(persistSnapshot: false);
-                SaveSettingsSnapshot();
-                _logger.Info(_settings.WiFiDirectAdapterPolicySummary);
-            }
+            CaptureWiFiDirectAdapterRestoreSnapshotIfNeeded();
+            ApplyWiFiDirectAdapterPolicy();
+        }
+        else
+        {
+            RefreshWiFiDirectAdapterPolicySummary(persistSnapshot: false);
+            SaveSettingsSnapshot();
+            _logger.Info(_settings.WiFiDirectAdapterPolicySummary);
         }
 
         RaiseStateChanged();
@@ -873,19 +1059,18 @@ public sealed class PowerController : IDisposable
 
     public void ReapplyBatteryStandbyHibernatePolicy()
     {
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (settings.EnforceBatteryStandbyHibernate)
         {
-            InvalidateStatusSnapshot();
-            if (_settings.EnforceBatteryStandbyHibernate)
-            {
-                ApplyBatteryStandbyHibernatePolicy();
-            }
-            else
-            {
-                RefreshBatteryStandbyHibernatePolicySummary(persistSnapshot: false);
-                SaveSettingsSnapshot();
-                _logger.Info(_settings.BatteryStandbyHibernatePolicySummary);
-            }
+            CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
+            ApplyBatteryStandbyHibernatePolicy();
+        }
+        else
+        {
+            RefreshBatteryStandbyHibernatePolicySummary(persistSnapshot: false);
+            SaveSettingsSnapshot();
+            _logger.Info(_settings.BatteryStandbyHibernatePolicySummary);
         }
 
         RaiseStateChanged();
@@ -894,22 +1079,21 @@ public sealed class PowerController : IDisposable
     public void BlockSoftwareWake()
     {
         var shouldNotify = false;
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (settings.DisableWakeTimers)
         {
-            InvalidateStatusSnapshot();
-            if (_settings.DisableWakeTimers)
-            {
-                _logger.Info("软件/定时器唤醒拦截已启用，正在重新应用当前电源计划策略。");
-                ApplyWakeTimerPolicy();
-                shouldNotify = true;
-            }
-            else
-            {
-                var updatedSettings = CloneCurrentSettings();
-                updatedSettings.DisableWakeTimers = true;
-                _logger.Info("已通过快捷按钮启用软件/定时器唤醒拦截。");
-                UpdateSettings(updatedSettings);
-            }
+            _logger.Info("软件/定时器唤醒拦截已启用，正在重新应用当前电源计划策略。");
+            CaptureWakeTimerRestoreSnapshotIfNeeded();
+            ApplyWakeTimerPolicy();
+            shouldNotify = true;
+        }
+        else
+        {
+            var updatedSettings = settings;
+            updatedSettings.DisableWakeTimers = true;
+            _logger.Info("已通过快捷按钮启用软件/定时器唤醒拦截。");
+            UpdateSettings(updatedSettings);
         }
 
         if (shouldNotify)
@@ -918,25 +1102,89 @@ public sealed class PowerController : IDisposable
         }
     }
 
+    private void ApplyStartupManagedSettings()
+    {
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        CancelPendingResumeProtection();
+        CancelPendingResumeEvaluation();
+
+        ApplyPolicy(settings.PolicyMode);
+
+        if (settings.DisableWakeTimers)
+        {
+            CaptureWakeTimerRestoreSnapshotIfNeeded();
+            ApplyWakeTimerPolicy();
+        }
+        else
+        {
+            RefreshWakeTimerPolicySummary(persistSnapshot: false);
+        }
+
+        if (settings.DisableStandbyConnectivity)
+        {
+            CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
+            ApplyStandbyConnectivityPolicy();
+        }
+        else
+        {
+            RefreshStandbyConnectivityPolicySummary(persistSnapshot: false);
+        }
+
+        if (settings.DisableWiFiDirectAdapters)
+        {
+            CaptureWiFiDirectAdapterRestoreSnapshotIfNeeded();
+            ApplyWiFiDirectAdapterPolicy();
+        }
+        else
+        {
+            RefreshWiFiDirectAdapterPolicySummary(persistSnapshot: false);
+        }
+
+        if (settings.EnforceBatteryStandbyHibernate)
+        {
+            CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
+            ApplyBatteryStandbyHibernatePolicy();
+        }
+        else
+        {
+            RefreshBatteryStandbyHibernatePolicySummary(persistSnapshot: false);
+        }
+
+        if (settings.BlockKnownRemoteWakeRequests)
+        {
+            var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(settings.CustomRemoteWakeEntries);
+            CaptureKnownRemoteWakeRestoreSnapshotIfNeeded(managedEntries);
+            ApplyKnownRemoteWakePolicy(managedEntries);
+        }
+        else
+        {
+            RefreshKnownRemoteWakePolicySummary(persistSnapshot: false);
+        }
+
+        ApplyRayLinkProcessStormGuardSettings();
+        EnsureAutostartMatchesSettings();
+        SaveSettingsSnapshot();
+        _logger.Info("启动后后台应用和校验已完成。");
+    }
+
     public void RestoreSoftwareWake()
     {
         var shouldNotify = false;
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (!settings.DisableWakeTimers)
         {
-            InvalidateStatusSnapshot();
-            if (!_settings.DisableWakeTimers)
-            {
-                _logger.Info("软件/定时器唤醒拦截当前未启用，无需恢复。");
-                RefreshWakeTimerPolicySummary();
-                shouldNotify = true;
-            }
-            else
-            {
-                var updatedSettings = CloneCurrentSettings();
-                updatedSettings.DisableWakeTimers = false;
-                _logger.Info("已通过快捷按钮请求恢复软件/定时器唤醒策略。");
-                UpdateSettings(updatedSettings);
-            }
+            _logger.Info("软件/定时器唤醒拦截当前未启用，无需恢复。");
+            RefreshWakeTimerPolicySummary();
+            shouldNotify = true;
+        }
+        else
+        {
+            var updatedSettings = settings;
+            updatedSettings.DisableWakeTimers = false;
+            _logger.Info("已通过快捷按钮请求恢复软件/定时器唤醒策略。");
+            UpdateSettings(updatedSettings);
         }
 
         if (shouldNotify)
@@ -948,22 +1196,21 @@ public sealed class PowerController : IDisposable
     public void BlockStandbyConnectivityWake()
     {
         var shouldNotify = false;
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (settings.DisableStandbyConnectivity)
         {
-            InvalidateStatusSnapshot();
-            if (_settings.DisableStandbyConnectivity)
-            {
-                _logger.Info("待机联网拦截已启用，正在重新应用当前电源计划策略。");
-                ApplyStandbyConnectivityPolicy();
-                shouldNotify = true;
-            }
-            else
-            {
-                var updatedSettings = CloneCurrentSettings();
-                updatedSettings.DisableStandbyConnectivity = true;
-                _logger.Info("已通过快捷按钮启用待机联网拦截。");
-                UpdateSettings(updatedSettings);
-            }
+            _logger.Info("待机联网拦截已启用，正在重新应用当前电源计划策略。");
+            CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
+            ApplyStandbyConnectivityPolicy();
+            shouldNotify = true;
+        }
+        else
+        {
+            var updatedSettings = settings;
+            updatedSettings.DisableStandbyConnectivity = true;
+            _logger.Info("已通过快捷按钮启用待机联网拦截。");
+            UpdateSettings(updatedSettings);
         }
 
         if (shouldNotify)
@@ -975,22 +1222,20 @@ public sealed class PowerController : IDisposable
     public void RestoreStandbyConnectivityWake()
     {
         var shouldNotify = false;
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (!settings.DisableStandbyConnectivity)
         {
-            InvalidateStatusSnapshot();
-            if (!_settings.DisableStandbyConnectivity)
-            {
-                _logger.Info("待机联网拦截当前未启用，无需恢复。");
-                RefreshStandbyConnectivityPolicySummary();
-                shouldNotify = true;
-            }
-            else
-            {
-                var updatedSettings = CloneCurrentSettings();
-                updatedSettings.DisableStandbyConnectivity = false;
-                _logger.Info("已通过快捷按钮请求恢复待机联网策略。");
-                UpdateSettings(updatedSettings);
-            }
+            _logger.Info("待机联网拦截当前未启用，无需恢复。");
+            RefreshStandbyConnectivityPolicySummary();
+            shouldNotify = true;
+        }
+        else
+        {
+            var updatedSettings = settings;
+            updatedSettings.DisableStandbyConnectivity = false;
+            _logger.Info("已通过快捷按钮请求恢复待机联网策略。");
+            UpdateSettings(updatedSettings);
         }
 
         if (shouldNotify)
@@ -1002,22 +1247,21 @@ public sealed class PowerController : IDisposable
     public void DisableWiFiDirectAdapters()
     {
         var shouldNotify = false;
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (settings.DisableWiFiDirectAdapters)
         {
-            InvalidateStatusSnapshot();
-            if (_settings.DisableWiFiDirectAdapters)
-            {
-                _logger.Info("Wi-Fi Direct 虚拟适配器禁用策略已启用，正在重新应用。");
-                ApplyWiFiDirectAdapterPolicy();
-                shouldNotify = true;
-            }
-            else
-            {
-                var updatedSettings = CloneCurrentSettings();
-                updatedSettings.DisableWiFiDirectAdapters = true;
-                _logger.Info("已通过快捷按钮启用 Wi-Fi Direct 虚拟适配器禁用策略。");
-                UpdateSettings(updatedSettings);
-            }
+            _logger.Info("Wi-Fi Direct 虚拟适配器禁用策略已启用，正在重新应用。");
+            CaptureWiFiDirectAdapterRestoreSnapshotIfNeeded();
+            ApplyWiFiDirectAdapterPolicy();
+            shouldNotify = true;
+        }
+        else
+        {
+            var updatedSettings = settings;
+            updatedSettings.DisableWiFiDirectAdapters = true;
+            _logger.Info("已通过快捷按钮启用 Wi-Fi Direct 虚拟适配器禁用策略。");
+            UpdateSettings(updatedSettings);
         }
 
         if (shouldNotify)
@@ -1029,22 +1273,20 @@ public sealed class PowerController : IDisposable
     public void RestoreWiFiDirectAdapters()
     {
         var shouldNotify = false;
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (!settings.DisableWiFiDirectAdapters)
         {
-            InvalidateStatusSnapshot();
-            if (!_settings.DisableWiFiDirectAdapters)
-            {
-                _logger.Info("Wi-Fi Direct 虚拟适配器禁用策略当前未启用，无需恢复。");
-                RefreshWiFiDirectAdapterPolicySummary();
-                shouldNotify = true;
-            }
-            else
-            {
-                var updatedSettings = CloneCurrentSettings();
-                updatedSettings.DisableWiFiDirectAdapters = false;
-                _logger.Info("已通过快捷按钮请求恢复 Wi-Fi Direct 虚拟适配器状态。");
-                UpdateSettings(updatedSettings);
-            }
+            _logger.Info("Wi-Fi Direct 虚拟适配器禁用策略当前未启用，无需恢复。");
+            RefreshWiFiDirectAdapterPolicySummary();
+            shouldNotify = true;
+        }
+        else
+        {
+            var updatedSettings = settings;
+            updatedSettings.DisableWiFiDirectAdapters = false;
+            _logger.Info("已通过快捷按钮请求恢复 Wi-Fi Direct 虚拟适配器状态。");
+            UpdateSettings(updatedSettings);
         }
 
         if (shouldNotify)
@@ -1056,22 +1298,21 @@ public sealed class PowerController : IDisposable
     public void EnableBatteryStandbyHibernateFallback()
     {
         var shouldNotify = false;
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (settings.EnforceBatteryStandbyHibernate)
         {
-            InvalidateStatusSnapshot();
-            if (_settings.EnforceBatteryStandbyHibernate)
-            {
-                _logger.Info("电池兜底休眠已启用，正在重新应用当前电源计划策略。");
-                ApplyBatteryStandbyHibernatePolicy();
-                shouldNotify = true;
-            }
-            else
-            {
-                var updatedSettings = CloneCurrentSettings();
-                updatedSettings.EnforceBatteryStandbyHibernate = true;
-                _logger.Info("已通过快捷按钮启用电池待机兜底休眠。");
-                UpdateSettings(updatedSettings);
-            }
+            _logger.Info("电池兜底休眠已启用，正在重新应用当前电源计划策略。");
+            CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
+            ApplyBatteryStandbyHibernatePolicy();
+            shouldNotify = true;
+        }
+        else
+        {
+            var updatedSettings = settings;
+            updatedSettings.EnforceBatteryStandbyHibernate = true;
+            _logger.Info("已通过快捷按钮启用电池待机兜底休眠。");
+            UpdateSettings(updatedSettings);
         }
 
         if (shouldNotify)
@@ -1083,22 +1324,20 @@ public sealed class PowerController : IDisposable
     public void RestoreBatteryStandbyHibernateFallback()
     {
         var shouldNotify = false;
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (!settings.EnforceBatteryStandbyHibernate)
         {
-            InvalidateStatusSnapshot();
-            if (!_settings.EnforceBatteryStandbyHibernate)
-            {
-                _logger.Info("电池兜底休眠当前未启用，无需恢复。");
-                RefreshBatteryStandbyHibernatePolicySummary();
-                shouldNotify = true;
-            }
-            else
-            {
-                var updatedSettings = CloneCurrentSettings();
-                updatedSettings.EnforceBatteryStandbyHibernate = false;
-                _logger.Info("已通过快捷按钮请求恢复电池待机休眠策略。");
-                UpdateSettings(updatedSettings);
-            }
+            _logger.Info("电池兜底休眠当前未启用，无需恢复。");
+            RefreshBatteryStandbyHibernatePolicySummary();
+            shouldNotify = true;
+        }
+        else
+        {
+            var updatedSettings = settings;
+            updatedSettings.EnforceBatteryStandbyHibernate = false;
+            _logger.Info("已通过快捷按钮请求恢复电池待机休眠策略。");
+            UpdateSettings(updatedSettings);
         }
 
         if (shouldNotify)
@@ -1110,22 +1349,22 @@ public sealed class PowerController : IDisposable
     public void BlockKnownRemoteWakeRequests()
     {
         var shouldNotify = false;
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (settings.BlockKnownRemoteWakeRequests)
         {
-            InvalidateStatusSnapshot();
-            if (_settings.BlockKnownRemoteWakeRequests)
-            {
-                _logger.Info("常见远程软件保持唤醒拦截已启用，正在重新应用规则。");
-                ApplyKnownRemoteWakePolicy();
-                shouldNotify = true;
-            }
-            else
-            {
-                var updatedSettings = CloneCurrentSettings();
-                updatedSettings.BlockKnownRemoteWakeRequests = true;
-                _logger.Info("已通过快捷按钮启用常见远程软件保持唤醒拦截。");
-                UpdateSettings(updatedSettings);
-            }
+            _logger.Info("常见远程软件保持唤醒拦截已启用，正在重新应用规则。");
+            var managedEntries = RemoteWakeBlockCatalog.GetManagedEntries(settings.CustomRemoteWakeEntries);
+            CaptureKnownRemoteWakeRestoreSnapshotIfNeeded(managedEntries);
+            ApplyKnownRemoteWakePolicy(managedEntries);
+            shouldNotify = true;
+        }
+        else
+        {
+            var updatedSettings = settings;
+            updatedSettings.BlockKnownRemoteWakeRequests = true;
+            _logger.Info("已通过快捷按钮启用常见远程软件保持唤醒拦截。");
+            UpdateSettings(updatedSettings);
         }
 
         if (shouldNotify)
@@ -1137,22 +1376,20 @@ public sealed class PowerController : IDisposable
     public void RestoreKnownRemoteWakeRequests()
     {
         var shouldNotify = false;
-        lock (_stateSync)
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        if (!settings.BlockKnownRemoteWakeRequests)
         {
-            InvalidateStatusSnapshot();
-            if (!_settings.BlockKnownRemoteWakeRequests)
-            {
-                _logger.Info("常见远程软件保持唤醒拦截当前未启用，无需恢复。");
-                RefreshKnownRemoteWakePolicySummary();
-                shouldNotify = true;
-            }
-            else
-            {
-                var updatedSettings = CloneCurrentSettings();
-                updatedSettings.BlockKnownRemoteWakeRequests = false;
-                _logger.Info("已通过快捷按钮请求恢复常见远程软件保持唤醒策略。");
-                UpdateSettings(updatedSettings);
-            }
+            _logger.Info("常见远程软件保持唤醒拦截当前未启用，无需恢复。");
+            RefreshKnownRemoteWakePolicySummary();
+            shouldNotify = true;
+        }
+        else
+        {
+            var updatedSettings = settings;
+            updatedSettings.BlockKnownRemoteWakeRequests = false;
+            _logger.Info("已通过快捷按钮请求恢复常见远程软件保持唤醒策略。");
+            UpdateSettings(updatedSettings);
         }
 
         if (shouldNotify)
@@ -2003,6 +2240,7 @@ public sealed class PowerController : IDisposable
 
     private void OnRayLinkProcessStormStateChanged(object? sender, EventArgs e)
     {
+        var shouldRaise = false;
         lock (_stateSync)
         {
             if (_disposed)
@@ -2010,10 +2248,23 @@ public sealed class PowerController : IDisposable
                 return;
             }
 
-            _settings.RayLinkProcessStormPolicySummary = _rayLinkProcessStormGuard.CurrentSummary;
-            SaveSettingsSnapshot();
+            var currentSummary = _rayLinkProcessStormGuard.CurrentSummary;
+            if (!string.Equals(_settings.RayLinkProcessStormPolicySummary, currentSummary, StringComparison.Ordinal))
+            {
+                _settings.RayLinkProcessStormPolicySummary = currentSummary;
+                shouldRaise = true;
+            }
+
             InvalidateStatusSnapshot();
         }
+
+        if (!shouldRaise)
+        {
+            return;
+        }
+
+        _logger.Info($"RayLink 进程风暴守护状态已更新：{_rayLinkProcessStormGuard.CurrentSummary}");
+        SaveSettingsSnapshot();
 
         RaiseStateChanged();
     }
@@ -2037,6 +2288,12 @@ public sealed class PowerController : IDisposable
     {
         var eventTime = DateTimeOffset.UtcNow;
         var shouldNotify = false;
+        var shouldStartSleepIsolation = false;
+        var shouldTriggerResumeScan = false;
+        var shouldReapplyCurrentPlan = false;
+        DateTimeOffset resumedAtUtc = default;
+        uint resumedAtTick = 0;
+
         lock (_stateSync)
         {
             if (e.Mode is PowerModes.Suspend)
@@ -2068,33 +2325,51 @@ public sealed class PowerController : IDisposable
                     CancelPendingResumeProtection();
                     CancelPendingResumeEvaluation();
                     ClearManualResumeSignals();
-                    _rayLinkProcessStormGuard.BeginSleepIsolation("系统进入挂起/休眠前");
-                    _settings.LastSuspendUtc = DateTimeOffset.UtcNow;
+                    shouldStartSleepIsolation = true;
+                    _settings.LastSuspendUtc = eventTime;
                     SaveSettingsSnapshot();
                     _logger.Warn("系统即将进入挂起/休眠。");
                     shouldNotify = true;
                     break;
 
                 case PowerModes.Resume:
-                    var resumedAtUtc = DateTimeOffset.UtcNow;
-                    var resumedAtTick = NativeMethods.GetTickCount();
-                    _rayLinkProcessStormGuard.TriggerHighFrequencyScan("系统恢复");
+                    resumedAtUtc = eventTime;
+                    resumedAtTick = NativeMethods.GetTickCount();
                     _settings.LastResumeUtc = resumedAtUtc;
                     _settings.LastWakeSummary = "正在等待恢复证据…";
                     _settings.LastWakeEvidenceSummary = $"已收到恢复事件，等待约 {ResumeAnalysisDelayMilliseconds / 1000.0:F1} 秒后补抓更完整证据。";
                     SaveSettingsSnapshot();
                     _logger.Warn("系统已从挂起/休眠恢复，正在等待系统写入更完整的恢复证据。");
                     shouldNotify = true;
-                    QueueResumeEvaluation(resumedAtUtc, resumedAtTick);
+                    shouldTriggerResumeScan = true;
                     break;
 
                 case PowerModes.StatusChange:
-                    if (!ReapplyManagedPoliciesForCurrentPowerPlan("电源状态变化"))
-                    {
-                        shouldNotify = true;
-                    }
+                    shouldReapplyCurrentPlan = true;
                     break;
             }
+        }
+
+        if (shouldNotify)
+        {
+            RaiseStateChanged();
+        }
+
+        if (shouldStartSleepIsolation)
+        {
+            _rayLinkProcessStormGuard.BeginSleepIsolation("系统进入挂起/休眠前");
+        }
+
+        if (shouldTriggerResumeScan)
+        {
+            _rayLinkProcessStormGuard.MarkSystemResume("系统恢复");
+            _rayLinkProcessStormGuard.TriggerHighFrequencyScan("系统恢复");
+            QueueResumeEvaluation(resumedAtUtc, resumedAtTick);
+        }
+
+        if (shouldReapplyCurrentPlan && !ReapplyManagedPoliciesForCurrentPowerPlan("电源状态变化"))
+        {
+            shouldNotify = true;
         }
 
         if (shouldNotify)
@@ -2116,33 +2391,65 @@ public sealed class PowerController : IDisposable
     private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
     {
         var shouldNotify = false;
+        var shouldTriggerRayLinkScan = false;
+        var shouldScheduleRayLinkRestore = false;
+        var reason = string.Empty;
         lock (_stateSync)
         {
-            if (e.Reason is not (SessionSwitchReason.SessionUnlock
+            var isManualSessionSignal = e.Reason is SessionSwitchReason.SessionUnlock
                 or SessionSwitchReason.ConsoleConnect
-                or SessionSwitchReason.RemoteConnect
-                or SessionSwitchReason.SessionLogon))
+                or SessionSwitchReason.SessionLogon;
+            var isRemoteSessionSignal = e.Reason is SessionSwitchReason.RemoteConnect;
+            if (!isManualSessionSignal && !isRemoteSessionSignal)
             {
                 return;
             }
 
             var eventTime = DateTimeOffset.UtcNow;
-            if (eventTime - _lastSessionSwitchEventUtc < SessionSwitchEventDebounceWindow)
+            var lastRelevantEventUtc = isRemoteSessionSignal
+                ? _lastRemoteSessionSwitchEventUtc
+                : _lastSessionSwitchEventUtc;
+            if (eventTime - lastRelevantEventUtc < SessionSwitchEventDebounceWindow)
             {
                 _logger.Warn($"检测到重复的会话切换事件 {e.Reason}，间隔过短，已忽略。");
                 return;
             }
 
             InvalidateStatusSnapshot();
-            _lastSessionSwitchEventUtc = eventTime;
-            var reason = DescribeSessionSwitchReason(e.Reason);
-            _rayLinkProcessStormGuard.TriggerHighFrequencyScan(reason);
-            _rayLinkProcessStormGuard.ScheduleRestoreAfterManualResume(reason);
-            RecordManualResumeSignal(reason);
-
-            if (CancelPendingResumeProtection($"检测到{reason}，已取消待执行的自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。"))
+            if (isRemoteSessionSignal)
             {
-                shouldNotify = true;
+                _lastRemoteSessionSwitchEventUtc = eventTime;
+            }
+            else
+            {
+                _lastSessionSwitchEventUtc = eventTime;
+            }
+
+            reason = DescribeSessionSwitchReason(e.Reason);
+            shouldTriggerRayLinkScan = true;
+
+            if (!isRemoteSessionSignal)
+            {
+                shouldScheduleRayLinkRestore = true;
+                RecordManualResumeSignal(reason);
+
+                if (CancelPendingResumeProtection($"检测到{reason}，已取消待执行的自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。"))
+                {
+                    shouldNotify = true;
+                }
+            }
+            else
+            {
+                _logger.Warn("检测到远程会话连接，按远控/软件事件处理，不作为本地人工唤醒证据。");
+            }
+        }
+
+        if (shouldTriggerRayLinkScan)
+        {
+            _rayLinkProcessStormGuard.TriggerHighFrequencyScan(reason);
+            if (shouldScheduleRayLinkRestore)
+            {
+                _rayLinkProcessStormGuard.ScheduleRestoreAfterManualResume(reason);
             }
         }
 
@@ -2155,6 +2462,8 @@ public sealed class PowerController : IDisposable
     private void OnLidStateChanged(object? sender, bool isOpen)
     {
         var shouldNotify = false;
+        var shouldOpenScan = false;
+        var shouldStartSleepIsolation = false;
         lock (_stateSync)
         {
             var eventTime = DateTimeOffset.UtcNow;
@@ -2169,19 +2478,29 @@ public sealed class PowerController : IDisposable
 
             if (!isOpen)
             {
-                _rayLinkProcessStormGuard.BeginSleepIsolation("合盖");
+                shouldStartSleepIsolation = true;
                 return;
             }
 
             InvalidateStatusSnapshot();
-            _rayLinkProcessStormGuard.TriggerHighFrequencyScan("开盖");
-            _rayLinkProcessStormGuard.ScheduleRestoreAfterManualResume("开盖");
+            shouldOpenScan = true;
             RecordManualResumeSignal("开盖");
 
             if (CancelPendingResumeProtection($"检测到开盖操作，已取消待执行的自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。"))
             {
                 shouldNotify = true;
             }
+        }
+
+        if (shouldStartSleepIsolation)
+        {
+            _rayLinkProcessStormGuard.BeginSleepIsolation("合盖");
+        }
+
+        if (shouldOpenScan)
+        {
+            _rayLinkProcessStormGuard.TriggerHighFrequencyScan("开盖");
+            _rayLinkProcessStormGuard.ScheduleRestoreAfterManualResume("开盖");
         }
 
         if (shouldNotify)
@@ -2248,50 +2567,73 @@ public sealed class PowerController : IDisposable
 
     private void OnResumeTimerElapsed()
     {
+        uint? armedAtTick;
+        bool isUserInteraction;
+        var now = DateTimeOffset.UtcNow;
+        ResumeProtectionMode currentMode;
         lock (_stateSync)
         {
             InvalidateStatusSnapshot();
-            uint? armedAtTick;
+            armedAtTick = null;
             lock (_resumeProtectionSync)
             {
                 _resumeTimer.Change(Timeout.Infinite, Timeout.Infinite);
                 armedAtTick = _resumeProtectionArmedAtTick;
                 _resumeProtectionArmedAtTick = null;
             }
+        }
 
-            if (armedAtTick is null)
-            {
-                return;
-            }
+        if (armedAtTick is null)
+        {
+            return;
+        }
 
-            if (HasUserInteractionSince(armedAtTick.Value))
-            {
-                _logger.Info($"检测到恢复后已有人工操作，已取消本次自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
-                RaiseStateChanged();
-                return;
-            }
+        isUserInteraction = HasUserInteractionSince(armedAtTick.Value);
+        lock (_stateSync)
+        {
+            currentMode = _settings.ResumeProtectionMode;
+        }
 
-            if (DateTimeOffset.UtcNow - _lastResumeProtectionActionUtc < ResumeProtectionSuppressionWindow)
-            {
-                _logger.Warn($"检测到近期恢复事件，触发频率抑制，取消本次自动{DescribeResumeProtection(_settings.ResumeProtectionMode)}。");
-                _lastResumeProtectionActionUtc = DateTimeOffset.UtcNow;
-                return;
-            }
+        if (isUserInteraction)
+        {
+            _logger.Info($"检测到恢复后已有人工操作，已取消本次自动{DescribeResumeProtection(currentMode)}。");
+            InvalidateStatusSnapshot();
+            RaiseStateChanged();
+            return;
+        }
 
-            _lastResumeProtectionActionUtc = DateTimeOffset.UtcNow;
+        var shouldSuppress = false;
+        lock (_stateSync)
+        {
+            shouldSuppress = now - _lastResumeProtectionActionUtc < ResumeProtectionSuppressionWindow;
+            if (shouldSuppress)
+            {
+                _lastResumeProtectionActionUtc = now;
+            }
+        }
 
-            if (_settings.ResumeProtectionMode == ResumeProtectionMode.Hibernate)
-            {
-                RequestSuspend(PowerState.Hibernate, "恢复保护到期，执行自动休眠。");
-            }
-            else if (_settings.ResumeProtectionMode == ResumeProtectionMode.LockScreen)
-            {
-                RequestLockWorkStation("恢复保护到期，执行自动锁屏。");
-            }
-            else
-            {
-                RequestSuspend(PowerState.Suspend, "恢复保护到期，执行自动睡眠。");
-            }
+        if (shouldSuppress)
+        {
+            _logger.Warn($"检测到近期恢复事件，触发频率抑制，取消本次自动{DescribeResumeProtection(currentMode)}。");
+            return;
+        }
+
+        lock (_stateSync)
+        {
+            _lastResumeProtectionActionUtc = now;
+        }
+
+        if (currentMode == ResumeProtectionMode.Hibernate)
+        {
+            RequestSuspend(PowerState.Hibernate, "恢复保护到期，执行自动休眠。");
+        }
+        else if (currentMode == ResumeProtectionMode.LockScreen)
+        {
+            RequestLockWorkStation("恢复保护到期，执行自动锁屏。");
+        }
+        else
+        {
+            RequestSuspend(PowerState.Suspend, "恢复保护到期，执行自动睡眠。");
         }
     }
 
@@ -2485,6 +2827,7 @@ public sealed class PowerController : IDisposable
         var wakeTimers = snapshot.WakeTimersText.ToLowerInvariant();
         var powerRequests = snapshot.PowerRequestsText.ToLowerInvariant();
         var eventSummary = snapshot.EventSummary.ToLowerInvariant();
+        var sleepStudySummary = snapshot.SleepStudySummary.ToLowerInvariant();
         var combined = string.Join(
             Environment.NewLine,
             snapshot.LastWakeText,
@@ -2493,13 +2836,16 @@ public sealed class PowerController : IDisposable
             snapshot.EventSummary,
             snapshot.SleepStudySummary).ToLowerInvariant();
 
-        if (ContainsAny(combined, ManualWakeIndicators)
-            || eventSummary.Contains("input keyboard")
-            || eventSummary.Contains("input mouse")
-            || eventSummary.Contains("power button")
-            || eventSummary.Contains("lid"))
+        if (ContainsAny(lastWake, ManualWakeIndicators))
         {
             return new WakeAnalysis(WakeKind.Manual, "疑似人工唤醒（按键/开盖/鼠标键盘）");
+        }
+
+        if (ContainsAny(powerRequests, RemoteWakeIndicators)
+            || ContainsAny(eventSummary, RemoteWakeIndicators)
+            || ContainsAny(sleepStudySummary, RemoteWakeIndicators))
+        {
+            return new WakeAnalysis(WakeKind.Unattended, "疑似远控软件或保活请求导致恢复");
         }
 
         if (ContainsAny(combined, DeviceWakeIndicators))
@@ -2518,9 +2864,13 @@ public sealed class PowerController : IDisposable
             return new WakeAnalysis(WakeKind.Unattended, "疑似软件或定时器唤醒");
         }
 
-        if (ContainsAny(powerRequests, RemoteWakeIndicators))
+        if (ContainsAny(eventSummary, ManualWakeIndicators)
+            || eventSummary.Contains("input keyboard")
+            || eventSummary.Contains("input mouse")
+            || eventSummary.Contains("power button")
+            || eventSummary.Contains("lid"))
         {
-            return new WakeAnalysis(WakeKind.Unattended, "疑似远控软件或保活请求导致恢复");
+            return new WakeAnalysis(WakeKind.Manual, "疑似人工唤醒（按键/开盖/鼠标键盘）");
         }
 
         if (ContainsAny(lastWake, NoWakeSourceIndicators)
@@ -2560,18 +2910,21 @@ public sealed class PowerController : IDisposable
             {
                 return false;
             }
-
-            refreshAction(this);
-            return true;
         }
+
+        refreshAction(this);
+        return true;
     }
 
     private void SaveSettingsSnapshot()
     {
+        AppSettings snapshot;
         lock (_stateSync)
         {
-            _settingsStore.Save(_settings.Clone());
+            snapshot = _settings.Clone();
         }
+
+        _settingsStore.Save(snapshot);
     }
 
     private string[] SetStandbyConnectivityPolicy(int connectivityAcValue, int connectivityDcValue, int disconnectedAcValue, int disconnectedDcValue)
@@ -2747,6 +3100,10 @@ public sealed class PowerController : IDisposable
                 : _settings.BatteryStandbyHibernateTimeoutSeconds,
             180,
             14400);
+        _settings.ResumeProtectionDelaySeconds = Math.Clamp(
+            _settings.ResumeProtectionDelaySeconds <= 0 ? 8 : _settings.ResumeProtectionDelaySeconds,
+            3,
+            600);
         _settings.LastWakeSummary ??= "无";
         _settings.LastWakeEvidenceSummary ??= "无";
         _settings.WakeTimerPolicySummary ??= "未检查";
@@ -2874,76 +3231,74 @@ public sealed class PowerController : IDisposable
 
     private bool ReapplyManagedPoliciesForCurrentPowerPlan(string reason, bool forceReapplyForCurrentPlan = false)
     {
-        lock (_stateSync)
+        if (!TryGetActivePowerPlanInfo(out var planId, out var planName))
         {
-            if (!TryGetActivePowerPlanInfo(out var planId, out var planName))
+            return false;
+        }
+
+        var planChanged = false;
+        lock (_activePowerPlanSync)
+        {
+            planChanged = !string.Equals(_activePowerPlanKey, planId, StringComparison.OrdinalIgnoreCase);
+            if (!planChanged && !forceReapplyForCurrentPlan)
             {
                 return false;
             }
 
-            var planChanged = false;
-            lock (_activePowerPlanSync)
-            {
-                planChanged = !string.Equals(_activePowerPlanKey, planId, StringComparison.OrdinalIgnoreCase);
-                if (!planChanged && !forceReapplyForCurrentPlan)
-                {
-                    return false;
-                }
-
-                _activePowerPlanKey = planId;
-            }
-
-            InvalidateStatusSnapshot();
-            _logger.Info(
-                planChanged
-                    ? $"检测到当前电源计划已切换为 {planName} ({planId})，正在重新应用当前计划相关策略。来源：{reason}。"
-                    : $"检测到当前电源计划 {planName} ({planId}) 的配置可能已变化，正在重新核验并恢复当前计划相关策略。来源：{reason}。");
-
-            if (_settings.DisableWakeTimers)
-            {
-                if (planChanged)
-                {
-                    CaptureWakeTimerRestoreSnapshotIfNeeded();
-                }
-
-                ApplyWakeTimerPolicy();
-            }
-            else
-            {
-                RefreshWakeTimerPolicySummary();
-            }
-
-            if (_settings.DisableStandbyConnectivity)
-            {
-                if (planChanged)
-                {
-                    CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
-                }
-
-                ApplyStandbyConnectivityPolicy();
-            }
-            else
-            {
-                RefreshStandbyConnectivityPolicySummary();
-            }
-
-            if (_settings.EnforceBatteryStandbyHibernate)
-            {
-                if (planChanged)
-                {
-                    CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
-                }
-
-                ApplyBatteryStandbyHibernatePolicy();
-            }
-            else
-            {
-                RefreshBatteryStandbyHibernatePolicySummary();
-            }
-
-            RaiseStateChanged();
-            return true;
+            _activePowerPlanKey = planId;
         }
+
+        var settings = CloneCurrentSettings();
+        InvalidateStatusSnapshot();
+        _logger.Info(
+            planChanged
+                ? $"检测到当前电源计划已切换为 {planName} ({planId})，正在重新应用当前计划相关策略。来源：{reason}。"
+                : $"检测到当前电源计划 {planName} ({planId}) 的配置可能已变化，正在重新核验并恢复当前计划相关策略。来源：{reason}。");
+
+        if (settings.DisableWakeTimers)
+        {
+            if (planChanged)
+            {
+                CaptureWakeTimerRestoreSnapshotIfNeeded();
+            }
+
+            ApplyWakeTimerPolicy();
+        }
+        else
+        {
+            RefreshWakeTimerPolicySummary();
+        }
+
+        if (settings.DisableStandbyConnectivity)
+        {
+            if (planChanged)
+            {
+                CaptureStandbyConnectivityRestoreSnapshotIfNeeded();
+            }
+
+            ApplyStandbyConnectivityPolicy();
+        }
+        else
+        {
+            RefreshStandbyConnectivityPolicySummary();
+        }
+
+        if (settings.EnforceBatteryStandbyHibernate)
+        {
+            if (planChanged)
+            {
+                CaptureBatteryStandbyHibernateRestoreSnapshotIfNeeded();
+            }
+
+            ApplyBatteryStandbyHibernatePolicy();
+        }
+        else
+        {
+            RefreshBatteryStandbyHibernatePolicySummary();
+        }
+
+        RaiseStateChanged();
+        return true;
     }
 
     private static int NormalizeBatteryStandbyHibernateTimeoutSeconds(int timeoutSeconds)
@@ -3619,36 +3974,41 @@ public sealed class PowerController : IDisposable
                     analysis = new WakeAnalysis(WakeKind.Manual, "检测到恢复后立即有人机输入");
                 }
 
-                if (analysis.Kind == WakeKind.Manual)
-                {
-                    _rayLinkProcessStormGuard.ScheduleRestoreAfterManualResume(analysis.Summary);
-                }
-
-                lock (_stateSync)
-                {
-                    InvalidateStatusSnapshot();
-                    _settings.LastWakeSummary = analysis.Summary;
-                    _settings.LastWakeEvidenceSummary = _wakeDiagnostics.SummarizeEvidence(snapshot);
-                    SaveSettingsSnapshot();
-                    _logger.Warn($"系统已完成恢复分析。判定：{analysis.Summary}{Environment.NewLine}{BuildWakeDiagnosticsText(snapshot, includePowerRequests: true, includeSleepStudy: false)}");
-                    RaiseStateChanged();
-                    ArmResumeProtectionIfNeeded(analysis, resumedAtTick);
-                }
-            }
-            catch (Exception ex)
+            if (analysis.Kind == WakeKind.Manual)
             {
-                lock (_stateSync)
-                {
-                    InvalidateStatusSnapshot();
-                    _logger.Error($"恢复后分析失败：{ex.Message}");
-                    _settings.LastWakeSummary = "恢复分析失败";
-                    _settings.LastWakeEvidenceSummary = ex.Message;
-                    SaveSettingsSnapshot();
-                    RaiseStateChanged();
-                }
+                _rayLinkProcessStormGuard.ScheduleRestoreAfterManualResume(analysis.Summary);
             }
-        });
-    }
+
+            var wakeSummary = analysis.Summary;
+            var evidenceSummary = _wakeDiagnostics.SummarizeEvidence(snapshot);
+            var diagnosticsText = BuildWakeDiagnosticsText(snapshot, includePowerRequests: true, includeSleepStudy: false);
+            lock (_stateSync)
+            {
+                InvalidateStatusSnapshot();
+                _settings.LastWakeSummary = wakeSummary;
+                _settings.LastWakeEvidenceSummary = evidenceSummary;
+            }
+
+            _logger.Warn($"系统已完成恢复分析。判定：{wakeSummary}{Environment.NewLine}{diagnosticsText}");
+            SaveSettingsSnapshot();
+            RaiseStateChanged();
+            ArmResumeProtectionIfNeeded(analysis, resumedAtTick);
+        }
+        catch (Exception ex)
+        {
+            string failSummary = "恢复分析失败";
+            lock (_stateSync)
+            {
+                InvalidateStatusSnapshot();
+                _logger.Error($"恢复后分析失败：{ex.Message}");
+                _settings.LastWakeSummary = failSummary;
+                _settings.LastWakeEvidenceSummary = ex.Message;
+            }
+            SaveSettingsSnapshot();
+            RaiseStateChanged();
+        }
+    });
+}
 
     private void ClearManualResumeSignals()
     {
@@ -3735,16 +4095,19 @@ public sealed class PowerController : IDisposable
     {
         var manualWindow = ManualResumeCorrelationWindow;
 
-        if (_lastSessionSwitchEventUtc != DateTimeOffset.MinValue
-            && nowUtc - _lastSessionSwitchEventUtc <= manualWindow)
+        lock (_stateSync)
         {
-            return true;
-        }
+            if (_lastSessionSwitchEventUtc != DateTimeOffset.MinValue
+                && nowUtc - _lastSessionSwitchEventUtc <= manualWindow)
+            {
+                return true;
+            }
 
-        if (_lastLidStateEventUtc != DateTimeOffset.MinValue
-            && nowUtc - _lastLidStateEventUtc <= manualWindow)
-        {
-            return true;
+            if (_lastLidStateEventUtc != DateTimeOffset.MinValue
+                && nowUtc - _lastLidStateEventUtc <= manualWindow)
+            {
+                return true;
+            }
         }
 
         return false;
@@ -3761,16 +4124,19 @@ public sealed class PowerController : IDisposable
             }
         }
 
-        if (_lastSessionSwitchEventUtc != DateTimeOffset.MinValue
-            && nowUtc - _lastSessionSwitchEventUtc <= ManualResumeCorrelationWindow)
+        lock (_stateSync)
         {
-            return "会话切换";
-        }
+            if (_lastSessionSwitchEventUtc != DateTimeOffset.MinValue
+                && nowUtc - _lastSessionSwitchEventUtc <= ManualResumeCorrelationWindow)
+            {
+                return "本地会话切换";
+            }
 
-        if (_lastLidStateEventUtc != DateTimeOffset.MinValue
-            && nowUtc - _lastLidStateEventUtc <= ManualResumeCorrelationWindow)
-        {
-            return "合盖/开盖事件";
+            if (_lastLidStateEventUtc != DateTimeOffset.MinValue
+                && nowUtc - _lastLidStateEventUtc <= ManualResumeCorrelationWindow)
+            {
+                return "合盖/开盖事件";
+            }
         }
 
         return "人机输入";

@@ -25,13 +25,16 @@ public sealed class PowerCfgService
         var normalizedArguments = arguments?.Trim() ?? string.Empty;
         var now = DateTimeOffset.UtcNow;
 
-        if (!IsQueryCommand(normalizedArguments))
-        {
-            return ExecutePowerCfg(normalizedArguments, timeoutMilliseconds);
-        }
-
         lock (_runSync)
         {
+            if (!IsQueryCommand(normalizedArguments))
+            {
+                _queryResultCache.Clear();
+                var writeResult = ExecutePowerCfg(normalizedArguments, timeoutMilliseconds);
+                _queryResultCache.Clear();
+                return writeResult;
+            }
+
             PurgeExpiredCache(now);
             if (_queryResultCache.TryGetValue(normalizedArguments, out var cached))
             {
@@ -123,15 +126,20 @@ public sealed class PowerCfgService
     private static bool IsQueryCommand(string arguments)
     {
         return arguments.Equals(string.Empty, StringComparison.Ordinal)
-            || arguments.StartsWith("/q ", StringComparison.OrdinalIgnoreCase)
-            || arguments.StartsWith("/q\t", StringComparison.OrdinalIgnoreCase)
-            || arguments.Equals("/q", StringComparison.OrdinalIgnoreCase)
-            || arguments.StartsWith("/getactivescheme", StringComparison.OrdinalIgnoreCase)
-            || arguments.StartsWith("/requests", StringComparison.OrdinalIgnoreCase)
-            || arguments.StartsWith("/requestsoverride", StringComparison.OrdinalIgnoreCase)
-            || arguments.StartsWith("/waketimers", StringComparison.OrdinalIgnoreCase)
-            || arguments.StartsWith("/lastwake", StringComparison.OrdinalIgnoreCase)
-            || arguments.StartsWith("/sleepstudy", StringComparison.OrdinalIgnoreCase);
+            || IsCommandToken(arguments, "/q")
+            || IsCommandToken(arguments, "/getactivescheme")
+            || IsCommandToken(arguments, "/requests")
+            || arguments.Equals("/requestsoverride", StringComparison.OrdinalIgnoreCase)
+            || IsCommandToken(arguments, "/waketimers")
+            || IsCommandToken(arguments, "/lastwake")
+            || IsCommandToken(arguments, "/sleepstudy");
+    }
+
+    private static bool IsCommandToken(string arguments, string command)
+    {
+        return arguments.Equals(command, StringComparison.OrdinalIgnoreCase)
+            || arguments.StartsWith(command + " ", StringComparison.OrdinalIgnoreCase)
+            || arguments.StartsWith(command + "\t", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsPowerCfgTimeoutResult(string result)

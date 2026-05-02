@@ -30,6 +30,12 @@ jobs:
         run: |
           [xml]$project = Get-Content ".\SleepSentinel.csproj"
           $appVersion = $project.Project.PropertyGroup.Version
+          if ("${{ github.ref }}" -like "refs/tags/v*") {
+            $tagVersion = "${{ github.ref_name }}".TrimStart("v")
+            if ($tagVersion -ne $appVersion) {
+              throw "Release tag version ($tagVersion) does not match SleepSentinel.csproj Version ($appVersion)."
+            }
+          }
           "app_version=$appVersion" >> $env:GITHUB_OUTPUT
           "installer_name=SleepSentinel-Setup-v$appVersion-win-x64.exe" >> $env:GITHUB_OUTPUT
           "portable_name=SleepSentinel-v$appVersion-win-x64.exe" >> $env:GITHUB_OUTPUT

@@ -1,6 +1,6 @@
 #define MyAppName "SleepSentinel"
 #ifndef MyAppVersion
-#define MyAppVersion "1.0.60"
+#define MyAppVersion "1.0.64"
 #endif
 #define MyAppPublisher "Zhang"
 #define MyAppExeName "SleepSentinel.exe"
@@ -75,10 +75,10 @@ begin
     Exit;
   end;
 
-  Log('安装前尝试关闭正在运行的 SleepSentinel。');
+  Log('安装前尝试温和关闭正在运行的 SleepSentinel。');
   if not Exec(
     ExpandConstant('{cmd}'),
-    '/C taskkill /IM "{#MyAppExeName}" /T /F >nul 2>&1',
+    '/C taskkill /IM "{#MyAppExeName}" /T >nul 2>&1',
     '',
     SW_HIDE,
     ewWaitUntilTerminated,
@@ -89,11 +89,36 @@ begin
     Exit;
   end;
 
-  for Attempt := 1 to 10 do
+  for Attempt := 1 to 6 do
   begin
     if not IsSleepSentinelRunning() then
     begin
       Log('已成功关闭 SleepSentinel。');
+      Exit;
+    end;
+
+    Sleep(500);
+  end;
+
+  Log('温和关闭未完成，安装前执行强制止血关闭。');
+  if not Exec(
+    ExpandConstant('{cmd}'),
+    '/C taskkill /IM "{#MyAppExeName}" /T /F >nul 2>&1',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode) then
+  begin
+    Log('启动强制 taskkill 失败。');
+    Result := False;
+    Exit;
+  end;
+
+  for Attempt := 1 to 10 do
+  begin
+    if not IsSleepSentinelRunning() then
+    begin
+      Log('已强制关闭 SleepSentinel。');
       Exit;
     end;
 

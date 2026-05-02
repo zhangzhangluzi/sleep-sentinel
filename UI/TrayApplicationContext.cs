@@ -6,7 +6,7 @@ namespace SleepSentinel.UI;
 
 public sealed class TrayApplicationContext : ApplicationContext
 {
-    private const int DeferredWarmupDelayMilliseconds = 20000;
+    private const int DeferredWarmupDelayMilliseconds = 2000;
     private readonly PowerController _controller;
     private readonly FileLogger _logger;
     private readonly NotifyIcon _notifyIcon;
@@ -36,6 +36,8 @@ public sealed class TrayApplicationContext : ApplicationContext
     private int _queuedTrayRefresh;
     private int _deferredWarmupScheduled;
     private bool _isExiting;
+    private string _cachedTrayText = string.Empty;
+    private string _cachedTrayRiskSummary = string.Empty;
 
     public TrayApplicationContext(
         PowerController controller,
@@ -341,22 +343,42 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void RefreshTrayText()
     {
         var settings = _controller.CurrentSettings;
-        var text = $"SleepSentinel - {_controller.CurrentStatus}";
-        _notifyIcon.Text = text.Length > 63 ? text[..63] : text;
+        var statusText = $"SleepSentinel - {_controller.CurrentStatus}";
+        var trayText = statusText.Length > 63 ? statusText[..63] : statusText;
+        if (!string.Equals(_cachedTrayText, trayText, StringComparison.Ordinal))
+        {
+            _notifyIcon.Text = trayText;
+            _cachedTrayText = trayText;
+        }
+
         _notifyIcon.BalloonTipTitle = "SleepSentinel";
-        _notifyIcon.BalloonTipText = _controller.StartupWarmupCompleted
+        var riskSummary = _controller.StartupWarmupCompleted
             ? _controller.CurrentRiskSummary
             : "SleepSentinel 已启动，详细状态会在后台补全。";
-        _followPowerPlanMenuItem.Checked = settings.PolicyMode == PowerPolicyMode.FollowPowerPlan;
-        _keepAwakeMenuItem.Checked = settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely;
-        _wakeTimersMenuItem.Checked = settings.DisableWakeTimers;
-        _standbyConnectivityMenuItem.Checked = settings.DisableStandbyConnectivity;
-        _batteryFallbackMenuItem.Checked = settings.EnforceBatteryStandbyHibernate;
-        _remoteWakeMenuItem.Checked = settings.BlockKnownRemoteWakeRequests;
-        _rayLinkProcessStormMenuItem.Checked = settings.MonitorRayLinkProcessStorm;
-        _rayLinkSleepIsolationMenuItem.Checked = settings.IsolateRayLinkDuringSleep;
-        _startMinimizedMenuItem.Checked = settings.StartMinimized;
-        _autostartMenuItem.Checked = settings.StartWithWindows;
+        if (!string.Equals(_cachedTrayRiskSummary, riskSummary, StringComparison.Ordinal))
+        {
+            _notifyIcon.BalloonTipText = riskSummary;
+            _cachedTrayRiskSummary = riskSummary;
+        }
+
+        SetMenuItemCheckedIfDifferent(_followPowerPlanMenuItem, settings.PolicyMode == PowerPolicyMode.FollowPowerPlan);
+        SetMenuItemCheckedIfDifferent(_keepAwakeMenuItem, settings.PolicyMode == PowerPolicyMode.KeepAwakeIndefinitely);
+        SetMenuItemCheckedIfDifferent(_wakeTimersMenuItem, settings.DisableWakeTimers);
+        SetMenuItemCheckedIfDifferent(_standbyConnectivityMenuItem, settings.DisableStandbyConnectivity);
+        SetMenuItemCheckedIfDifferent(_batteryFallbackMenuItem, settings.EnforceBatteryStandbyHibernate);
+        SetMenuItemCheckedIfDifferent(_remoteWakeMenuItem, settings.BlockKnownRemoteWakeRequests);
+        SetMenuItemCheckedIfDifferent(_rayLinkProcessStormMenuItem, settings.MonitorRayLinkProcessStorm);
+        SetMenuItemCheckedIfDifferent(_rayLinkSleepIsolationMenuItem, settings.IsolateRayLinkDuringSleep);
+        SetMenuItemCheckedIfDifferent(_startMinimizedMenuItem, settings.StartMinimized);
+        SetMenuItemCheckedIfDifferent(_autostartMenuItem, settings.StartWithWindows);
+    }
+
+    private static void SetMenuItemCheckedIfDifferent(ToolStripMenuItem menuItem, bool isChecked)
+    {
+        if (menuItem.Checked != isChecked)
+        {
+            menuItem.Checked = isChecked;
+        }
     }
 
     private void QueueTrayTextRefresh()

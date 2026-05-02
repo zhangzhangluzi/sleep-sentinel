@@ -37,11 +37,20 @@ public sealed class WakeDiagnosticsService
         "updateorchestrator",
         "windowsupdateclient",
         "anydesk",
+        "anyviewer",
+        "oray",
+        "parsec",
+        "raylink",
+        "sunlogin",
         "teamviewer",
         "todesk",
         "rustdesk",
         "gameviewer",
-        "vnc"
+        "splashtop",
+        "ultraviewer",
+        "vnc",
+        "向日葵",
+        "uu远控"
     ];
 
     private readonly PowerCfgService _powerCfg;
@@ -145,8 +154,15 @@ public sealed class WakeDiagnosticsService
 
         return string.Join(Environment.NewLine, lines
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(static line => line, StringComparer.OrdinalIgnoreCase)
-            .TakeLast(12));
+            .Select(static line => new
+            {
+                Line = line,
+                Timestamp = TryExtractLineTimestamp(line) ?? DateTimeOffset.MinValue
+            })
+            .OrderBy(static item => item.Timestamp)
+            .ThenBy(static item => item.Line, StringComparer.OrdinalIgnoreCase)
+            .TakeLast(12)
+            .Select(static item => item.Line));
     }
 
     private IEnumerable<string> ReadSystemHighlights(DateTimeOffset sinceUtc)
@@ -285,14 +301,23 @@ public sealed class WakeDiagnosticsService
                 .ToList();
 
             var latestSleepState = sleepStates
-                .FirstOrDefault(static item =>
-                    item.Type.Equals("Hibernate", StringComparison.OrdinalIgnoreCase)
-                    && item.EntryReason.Contains("Hibernate from Sleep", StringComparison.OrdinalIgnoreCase))
-                ?? sleepStates.FirstOrDefault(static item => item.Type.Equals("Sleep", StringComparison.OrdinalIgnoreCase))
-                ?? sleepStates.FirstOrDefault(static item =>
-                    item.Type.Equals("Screen Off", StringComparison.OrdinalIgnoreCase)
-                    && !string.IsNullOrWhiteSpace(item.ExitReason)
-                    && !item.ExitReason.Equals("Unknown", StringComparison.OrdinalIgnoreCase));
+                .Where(static item =>
+                    item.Type.Equals("Sleep", StringComparison.OrdinalIgnoreCase)
+                    || item.Type.Equals("Hibernate", StringComparison.OrdinalIgnoreCase)
+                    || (item.Type.Equals("Screen Off", StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrWhiteSpace(item.ExitReason)
+                        && !item.ExitReason.Equals("Unknown", StringComparison.OrdinalIgnoreCase)))
+                .OrderByDescending(static item => item.StartLocal)
+                .ThenByDescending(static item =>
+                    item.Type.Equals("Sleep", StringComparison.OrdinalIgnoreCase)
+                        ? 3
+                        : item.Type.Equals("Hibernate", StringComparison.OrdinalIgnoreCase)
+                            && item.EntryReason.Contains("Hibernate from Sleep", StringComparison.OrdinalIgnoreCase)
+                            ? 2
+                            : item.Type.Equals("Hibernate", StringComparison.OrdinalIgnoreCase)
+                                ? 1
+                                : 0)
+                .FirstOrDefault();
 
             if (latestSleepState is null)
             {
@@ -470,5 +495,23 @@ public sealed class WakeDiagnosticsService
         }
 
         return match.Groups["timestamp"].Value;
+    }
+
+    private static DateTimeOffset? TryExtractLineTimestamp(string line)
+    {
+        var rawTimestamp = ExtractEvidenceTimestamp(line);
+        if (string.IsNullOrWhiteSpace(rawTimestamp))
+        {
+            return null;
+        }
+
+        return DateTimeOffset.TryParseExact(
+            rawTimestamp,
+            "yyyy-MM-dd HH:mm:ss",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeLocal,
+            out var timestamp)
+            ? timestamp
+            : null;
     }
 }
