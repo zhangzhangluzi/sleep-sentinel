@@ -80,7 +80,7 @@ public sealed class MainForm : Form
         };
         _logRenderTimer.Tick += (_, _) => OnLogRenderTimerTick();
 
-        Text = AppVersionInfo.WindowTitle;
+        Text = "SleepSentinel";
         MinimumSize = new Size(MinimumWindowWidth, MinimumWindowHeight);
         StartPosition = FormStartPosition.Manual;
         Icon = _appIcon;
@@ -1328,7 +1328,8 @@ public sealed class MainForm : Form
             Multiline = true,
             ReadOnly = true,
             ScrollBars = ScrollBars.Vertical,
-            Dock = DockStyle.Fill
+            Dock = DockStyle.Fill,
+            TabStop = false
         };
     }
 

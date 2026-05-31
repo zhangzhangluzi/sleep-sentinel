@@ -21,7 +21,6 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private const int StableWindowNormalizeThreshold = 2;
     private const int StormConsecutiveConfirmations = 2;
     private static readonly TimeSpan SleepIsolationScanPeriod = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan SleepIsolationNoResumeRollbackDelay = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan SleepIsolationRestoreDelay = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan ContainmentCooldown = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan SleepIsolationActionCooldown = TimeSpan.FromSeconds(15);
@@ -54,7 +53,6 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     private bool _isolateDuringSleep;
     private bool _sleepIsolationActive;
     private bool _restoreRayLinkServiceAfterSleep;
-    private bool _sleepIsolationResumeObserved;
     private bool _disposed;
     private string _currentSummary = "RayLink 进程风暴守护未启用";
     private string _currentQuickState = "当前：未启用";
@@ -138,7 +136,6 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             {
                 _sleepIsolationActive = false;
                 _restoreRayLinkServiceAfterSleep = false;
-                _sleepIsolationResumeObserved = false;
                 _restoreGeneration++;
             }
 
@@ -150,7 +147,6 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                 _consecutiveStormSamples = 0;
                 _sleepIsolationActive = false;
                 _restoreRayLinkServiceAfterSleep = false;
-                _sleepIsolationResumeObserved = false;
                 _restoreGeneration++;
                 _timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
                 SetStateUnsafe("RayLink 进程风暴守护未启用", "当前：未启用");
@@ -170,7 +166,6 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
     {
         bool enabled;
         bool isolateDuringSleep;
-        int generation;
         lock (_sync)
         {
             enabled = _enabled;
@@ -193,8 +188,7 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
 
             _sleepIsolationActive = true;
             _restoreRayLinkServiceAfterSleep |= shouldRestoreService;
-            _sleepIsolationResumeObserved = false;
-            generation = ++_restoreGeneration;
+            _restoreGeneration++;
             SetStateUnsafe(
                 $"RayLink 睡眠隔离已启用；触发：{reason}；睡眠期间会暂停并持续压制 RayLink，不禁用服务",
                 "当前：睡眠隔离中");
@@ -204,7 +198,6 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
         _logger.Warn($"RayLink 睡眠隔离启动：{reason}。将暂停 RayLink，避免睡眠期间被它反复拉起。");
         EnforceSleepIsolationIfNeeded("睡眠隔离启动");
         RaiseStateChanged();
-        ScheduleNoResumeRollback(generation, reason);
     }
 
     public void MarkSystemResume(string reason)
@@ -217,7 +210,6 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
                 return;
             }
 
-            _sleepIsolationResumeObserved = true;
             SetStateUnsafe(
                 $"RayLink 睡眠隔离保持中；已观察到系统恢复：{reason}；等待人工输入后再恢复 RayLink",
                 "当前：等待人工恢复");
@@ -536,7 +528,6 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             _sleepIsolationActive = false;
             shouldStartService = _restoreRayLinkServiceAfterSleep;
             _restoreRayLinkServiceAfterSleep = false;
-            _sleepIsolationResumeObserved = false;
             _timer.Change(ScanPeriod, ScanPeriod);
         }
 
@@ -545,52 +536,6 @@ internal sealed class RayLinkProcessStormGuard : IDisposable
             : "睡前 RayLinkService 未运行，本次不自动启动";
         _logger.Info($"RayLink 睡眠隔离已结束：{restoreResult}。");
         SetState($"RayLink 睡眠隔离已结束：{restoreResult}", "当前：监控中");
-    }
-
-    private void ScheduleNoResumeRollback(int generation, string reason)
-    {
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(SleepIsolationNoResumeRollbackDelay).ConfigureAwait(false);
-                CompleteNoResumeRollback(generation, reason);
-            }
-            catch (Exception ex)
-            {
-                _logger.Warn($"RayLink 睡眠隔离未恢复回滚任务失败：{ex.Message}");
-            }
-        });
-    }
-
-    private void CompleteNoResumeRollback(int generation, string reason)
-    {
-        var shouldStartService = false;
-        lock (_sync)
-        {
-            if (_disposed
-                || !_enabled
-                || !_sleepIsolationActive
-                || generation != _restoreGeneration
-                || _sleepIsolationResumeObserved)
-            {
-                return;
-            }
-
-            _sleepIsolationActive = false;
-            shouldStartService = _restoreRayLinkServiceAfterSleep;
-            _restoreRayLinkServiceAfterSleep = false;
-            _sleepIsolationResumeObserved = false;
-            _timer.Change(ScanPeriod, ScanPeriod);
-        }
-
-        var restoreResult = shouldStartService
-            ? StartRayLinkService()
-            : "睡前 RayLinkService 未运行，本次不自动启动";
-        var summary = $"RayLink 睡眠隔离已自动回滚：{reason} 后 {SleepIsolationNoResumeRollbackDelay.TotalMinutes:F0} 分钟内未观察到系统恢复事件，判断本次睡眠未成立或被取消；{restoreResult}";
-        _logger.Warn(summary);
-        SetState(summary, "当前：监控中");
-        RaiseNotificationRequested("RayLink 睡眠隔离已自动回滚：未观察到真正的系统恢复事件，RayLink 已按睡前状态恢复。");
     }
 
     private RayLinkStormSnapshot CollectSnapshot(bool includeServiceCrashHistory = true)

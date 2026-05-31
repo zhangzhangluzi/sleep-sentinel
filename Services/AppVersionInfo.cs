@@ -10,13 +10,9 @@ internal static class AppVersionInfo
 
     public static string ShortDisplayVersion => $"v{Version}";
 
-    public static string FullDisplayVersion => $"SleepSentinel {ShortDisplayVersion}";
-
     public static string DetailedDisplayVersion => FileVersion.Equals(Version, StringComparison.OrdinalIgnoreCase)
         ? ShortDisplayVersion
         : $"{ShortDisplayVersion}（文件版本 {FileVersion}）";
-
-    public static string WindowTitle => $"{FullDisplayVersion}";
 
     private static string ResolveVersion()
     {

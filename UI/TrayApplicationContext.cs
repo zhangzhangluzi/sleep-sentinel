@@ -275,14 +275,6 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
 
         _mainForm = new MainForm(_controller, _logger, _settingsStore, _appIcon);
-        _mainForm.FormClosed += (_, _) =>
-        {
-            if (_mainForm is not null && _mainForm.Visible)
-            {
-                _mainForm.Hide();
-            }
-        };
-
         return _mainForm;
     }
 
