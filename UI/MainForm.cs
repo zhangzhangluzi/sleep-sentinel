@@ -49,9 +49,13 @@ public sealed class MainForm : Form
     private readonly TextBox _detailsTextBox;
     private readonly TextBox _diagnosticsTextBox;
     private readonly TextBox _logTextBox;
+    private readonly Panel _settingsViewport;
     private readonly TableLayoutPanel _settingsPanel;
     private readonly FlowLayoutPanel _actionsFlow;
     private readonly Label _operationStatusLabel;
+    private readonly List<Control> _busyDisabledControls = [];
+    private readonly List<UiOperation> _activeUiOperations = [];
+    private readonly object _activeUiOperationsSync = new();
     private readonly EventHandler _stateChangedHandler;
     private readonly Icon _appIcon;
     private bool _diagnosticsRefreshInProgress;
@@ -63,7 +67,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _logRenderTimer;
     private int _queuedStateRefresh;
     private int _remoteWakeSuggestionInProgress;
-    private int _backgroundOperationCount;
+    private int _nextUiOperationId;
     private readonly SemaphoreSlim _controllerMutationGate = new(initialCount: 1);
     private int _pendingControllerMutationGeneration;
     private readonly Queue<string> _pendingLogLines = new();
@@ -122,13 +126,14 @@ public sealed class MainForm : Form
         };
         root.Controls.Add(intro);
 
-        var settingsViewport = new Panel
+        _settingsViewport = new Panel
         {
             Dock = DockStyle.Fill,
             AutoScroll = true,
             MinimumSize = new Size(0, 230),
             Padding = new Padding(0, 12, 0, 12)
         };
+        _settingsViewport.Resize += (_, _) => AdjustSettingsLayout();
 
         _settingsPanel = new TableLayoutPanel
         {
@@ -272,6 +277,7 @@ public sealed class MainForm : Form
 
         var wakeTimerActions = CreateSettingFlow();
         var reapplyWakeTimerButton = new Button { Text = "重新应用", AutoSize = true };
+        RegisterBusyDisabledControl(reapplyWakeTimerButton);
         reapplyWakeTimerButton.Click += (_, _) =>
         {
             if (!ApplyUiSettingsIfChanged())
@@ -287,6 +293,7 @@ public sealed class MainForm : Form
 
         var standbyConnectivityActions = CreateSettingFlow();
         var reapplyStandbyConnectivityButton = new Button { Text = "重新应用", AutoSize = true };
+        RegisterBusyDisabledControl(reapplyStandbyConnectivityButton);
         reapplyStandbyConnectivityButton.Click += (_, _) =>
         {
             if (!ApplyUiSettingsIfChanged())
@@ -302,6 +309,7 @@ public sealed class MainForm : Form
 
         var wifiDirectActions = CreateSettingFlow();
         var reapplyWiFiDirectButton = new Button { Text = "重新应用", AutoSize = true };
+        RegisterBusyDisabledControl(reapplyWiFiDirectButton);
         reapplyWiFiDirectButton.Click += (_, _) =>
         {
             if (!ApplyUiSettingsIfChanged())
@@ -317,6 +325,7 @@ public sealed class MainForm : Form
 
         var batteryStandbyHibernateActions = CreateSettingFlow();
         var reapplyBatteryStandbyHibernateButton = new Button { Text = "重新应用", AutoSize = true };
+        RegisterBusyDisabledControl(reapplyBatteryStandbyHibernateButton);
         reapplyBatteryStandbyHibernateButton.Click += (_, _) =>
         {
             if (!ApplyUiSettingsIfChanged())
@@ -334,6 +343,7 @@ public sealed class MainForm : Form
 
         var remoteWakeActions = CreateSettingFlow();
         var reapplyRemoteWakeButton = new Button { Text = "重新应用", AutoSize = true };
+        RegisterBusyDisabledControl(reapplyRemoteWakeButton);
         reapplyRemoteWakeButton.Click += (_, _) =>
         {
             if (!ApplyUiSettingsIfChanged())
@@ -342,6 +352,7 @@ public sealed class MainForm : Form
             }
         };
         var suggestRemoteWakeButton = new Button { Text = "自动建议", AutoSize = true };
+        RegisterBusyDisabledControl(suggestRemoteWakeButton);
         suggestRemoteWakeButton.Click += (_, _) => SuggestCustomRemoteWakeEntries();
         _remoteWakeQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         remoteWakeActions.Controls.Add(_blockKnownRemoteWakeCheckbox);
@@ -361,6 +372,7 @@ public sealed class MainForm : Form
         var customRemoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         var customRemoteWakeToolbar = CreateInlineFlow();
         var applyCustomRemoteWakeButton = new Button { Text = "应用名单", AutoSize = true };
+        RegisterBusyDisabledControl(applyCustomRemoteWakeButton);
         applyCustomRemoteWakeButton.Click += (_, _) => ApplyCustomRemoteEntriesFromUi();
         _customRemoteWakeHintLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         customRemoteWakeToolbar.Controls.Add(applyCustomRemoteWakeButton);
@@ -374,8 +386,8 @@ public sealed class MainForm : Form
         startupFlow.Controls.Add(_autostartCheckbox);
         AddSettingRow(_settingsPanel, 11, "启动行为", startupFlow);
 
-        settingsViewport.Controls.Add(_settingsPanel);
-        root.Controls.Add(settingsViewport);
+        _settingsViewport.Controls.Add(_settingsPanel);
+        root.Controls.Add(_settingsViewport);
 
         _actionsFlow = new FlowLayoutPanel
         {
@@ -386,6 +398,7 @@ public sealed class MainForm : Form
         };
 
         var reapplyAllButton = new Button { Text = "重新应用全部设置", AutoSize = true };
+        RegisterBusyDisabledControl(reapplyAllButton);
         reapplyAllButton.Click += (_, _) =>
         {
             if (!ApplyUiSettingsIfChanged())
@@ -398,10 +411,13 @@ public sealed class MainForm : Form
         var hibernateButton = new Button { Text = "立即休眠", AutoSize = true };
         hibernateButton.Click += (_, _) => _controller.HibernateNow();
         var refreshLogButton = new Button { Text = "刷新日志", AutoSize = true };
+        RegisterBusyDisabledControl(refreshLogButton);
         refreshLogButton.Click += (_, _) => LoadLogs();
         var diagnosticsButton = new Button { Text = "记录唤醒诊断", AutoSize = true };
+        RegisterBusyDisabledControl(diagnosticsButton);
         diagnosticsButton.Click += async (_, _) => await RefreshDiagnosticsAsync(logSnapshot: true);
         var exportReportButton = new Button { Text = "导出诊断报告", AutoSize = true };
+        RegisterBusyDisabledControl(exportReportButton);
         exportReportButton.Click += async (_, _) => await ExportDiagnosticReportAsync();
 
         _actionsFlow.Controls.Add(reapplyAllButton);
@@ -456,6 +472,7 @@ public sealed class MainForm : Form
         RefreshStatusAndDetails();
         _diagnosticsTextBox.Text = "最近诊断尚未刷新。点击“记录唤醒诊断”后，这里会显示 powercfg、事件日志和 SleepStudy 摘要。";
         LoadLogs();
+        AdjustSettingsLayout();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -562,7 +579,7 @@ public sealed class MainForm : Form
         }
 
         _logger.Info("开始后台扫描自定义远控候选项。");
-        BeginUiOperation("扫描远控候选项");
+        var operationId = BeginUiOperation("扫描远控候选项");
         _ = Task.Run(() =>
         {
             try
@@ -587,7 +604,7 @@ public sealed class MainForm : Form
             finally
             {
                 Interlocked.Exchange(ref _remoteWakeSuggestionInProgress, 0);
-                EndUiOperation();
+                EndUiOperation(operationId);
             }
         });
     }
@@ -621,7 +638,7 @@ public sealed class MainForm : Form
         var generation = coalesce
             ? Interlocked.Increment(ref _pendingControllerMutationGeneration)
             : 0;
-        BeginUiOperation(actionName);
+        var operationId = BeginUiOperation(actionName);
 
         _ = Task.Run(async () =>
         {
@@ -676,7 +693,7 @@ public sealed class MainForm : Form
                     RequestSyncUiFromController(includeDiagnostics: false);
                 }
 
-                EndUiOperation();
+                EndUiOperation(operationId);
             }
         });
     }
@@ -1103,7 +1120,7 @@ public sealed class MainForm : Form
 
         _diagnosticsRefreshInProgress = true;
         UseWaitCursor = true;
-        BeginUiOperation("记录唤醒诊断");
+        var operationId = BeginUiOperation("记录唤醒诊断");
 
         try
         {
@@ -1142,7 +1159,7 @@ public sealed class MainForm : Form
             {
                 UseWaitCursor = false;
             }
-            EndUiOperation();
+            EndUiOperation(operationId);
         }
     }
 
@@ -1155,7 +1172,7 @@ public sealed class MainForm : Form
 
         _diagnosticExportInProgress = true;
         UseWaitCursor = true;
-        BeginUiOperation("导出诊断报告");
+        var operationId = BeginUiOperation("导出诊断报告");
 
         try
         {
@@ -1180,7 +1197,7 @@ public sealed class MainForm : Form
             {
                 UseWaitCursor = false;
             }
-            EndUiOperation();
+            EndUiOperation(operationId);
         }
     }
 
@@ -1289,28 +1306,45 @@ public sealed class MainForm : Form
             $"电池供电下在待机 {_batteryStandbyHibernateTimeoutInput.Value} 分钟后自动转入休眠（仅 DC，防止合盖后一夜耗尽）";
     }
 
-    private void BeginUiOperation(string actionName)
+    private int BeginUiOperation(string actionName)
     {
-        Interlocked.Increment(ref _backgroundOperationCount);
-        SetUiOperationBusyState(isBusy: true, actionName);
-    }
-
-    private void EndUiOperation()
-    {
-        var remaining = Interlocked.Decrement(ref _backgroundOperationCount);
-        if (remaining < 0)
+        var operationId = Interlocked.Increment(ref _nextUiOperationId);
+        string statusText;
+        lock (_activeUiOperationsSync)
         {
-            remaining = 0;
-            Interlocked.Exchange(ref _backgroundOperationCount, 0);
+            _activeUiOperations.Add(new UiOperation(operationId, actionName));
+            statusText = BuildActiveUiOperationSummary();
         }
 
-        if (remaining == 0)
-        {
-            SetUiOperationBusyState(isBusy: false, actionName: string.Empty);
-        }
+        SetUiOperationBusyState(isBusy: true, statusText);
+        return operationId;
     }
 
-    private void SetUiOperationBusyState(bool isBusy, string actionName)
+    private void EndUiOperation(int operationId)
+    {
+        bool isBusy;
+        string statusText;
+        lock (_activeUiOperationsSync)
+        {
+            _activeUiOperations.RemoveAll(operation => operation.Id == operationId);
+            isBusy = _activeUiOperations.Count > 0;
+            statusText = isBusy ? BuildActiveUiOperationSummary() : string.Empty;
+        }
+
+        SetUiOperationBusyState(isBusy, statusText);
+    }
+
+    private string BuildActiveUiOperationSummary()
+    {
+        return _activeUiOperations.Count switch
+        {
+            0 => string.Empty,
+            1 => _activeUiOperations[0].Name,
+            _ => $"{_activeUiOperations[^1].Name} 等 {_activeUiOperations.Count} 个任务"
+        };
+    }
+
+    private void SetUiOperationBusyState(bool isBusy, string statusText)
     {
         if (IsDisposed)
         {
@@ -1326,7 +1360,7 @@ public sealed class MainForm : Form
 
             try
             {
-                BeginInvoke(new Action(() => SetUiOperationBusyState(isBusy, actionName)));
+                BeginInvoke(new Action(() => SetUiOperationBusyState(isBusy, statusText)));
             }
             catch (InvalidOperationException)
             {
@@ -1336,9 +1370,55 @@ public sealed class MainForm : Form
         }
 
         _settingsPanel.Enabled = !isBusy;
-        _actionsFlow.Enabled = !isBusy;
+        foreach (var control in _busyDisabledControls)
+        {
+            if (!control.IsDisposed)
+            {
+                control.Enabled = !isBusy;
+            }
+        }
+
         _operationStatusLabel.Visible = isBusy;
-        _operationStatusLabel.Text = isBusy ? $"正在执行：{actionName}..." : string.Empty;
+        _operationStatusLabel.Text = isBusy ? $"正在执行：{statusText}..." : string.Empty;
+    }
+
+    private void RegisterBusyDisabledControl(Control control)
+    {
+        _busyDisabledControls.Add(control);
+    }
+
+    private void AdjustSettingsLayout()
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        var availableWidth = _settingsViewport.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 8;
+        if (availableWidth <= 0)
+        {
+            return;
+        }
+
+        _settingsPanel.Width = Math.Max(availableWidth, 360);
+        var valueColumnWidth = Math.Max(260, availableWidth - 240);
+        var textWidth = Math.Max(240, valueColumnWidth - 24);
+        _policyModeComboBox.Width = Math.Min(280, textWidth);
+        _customRemoteWakeTextBox.Width = Math.Max(260, textWidth);
+        ApplyMaximumTextWidth(_settingsPanel, textWidth);
+    }
+
+    private static void ApplyMaximumTextWidth(Control control, int maxWidth)
+    {
+        foreach (Control child in control.Controls)
+        {
+            if (child is CheckBox or Label or RadioButton)
+            {
+                child.MaximumSize = new Size(maxWidth, 0);
+            }
+
+            ApplyMaximumTextWidth(child, maxWidth);
+        }
     }
 
     private void ApplyInitialWindowBounds(AppSettings settings)
@@ -1471,4 +1551,6 @@ public sealed class MainForm : Form
     {
         return value?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "无";
     }
+
+    private readonly record struct UiOperation(int Id, string Name);
 }
