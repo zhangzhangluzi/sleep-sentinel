@@ -1,5 +1,6 @@
 using SleepSentinel.Services;
 using SleepSentinel.UI;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Security.AccessControl;
@@ -28,19 +29,14 @@ internal static class Program
         var startupCrashLogPath = GetCrashLogPath();
         RegisterGlobalExceptionHandlers(crashDirectory);
         TrySetUnhandledExceptionMode(startupCrashLogPath);
-        var isQuietStartup = ShouldStartQuietly(args);
-        var isElevatedTaskStartup = IsElevatedTaskStartup(args);
+        var startupMode = ResolveStartupMode(args);
 
         using var activationEvent = CreateGlobalEventWaitHandle(ActivationEventName);
         using var takeoverEvent = CreateGlobalEventWaitHandle(TakeoverEventName);
-        using var singleInstance = AcquireSingleInstance(activationEvent, takeoverEvent, isElevatedTaskStartup);
+        using var singleInstance = AcquireSingleInstance(activationEvent, takeoverEvent, startupMode);
         if (singleInstance is null)
         {
             LogStartupTrace("检测到已有实例在运行，已尝试激活现有实例。");
-            if (!isQuietStartup)
-            {
-                ShowExistingInstanceHint();
-            }
             return;
         }
 
@@ -54,7 +50,7 @@ internal static class Program
             using var appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
             using var controller = new PowerController(settingsStore, logger, settings);
 
-            using var trayContext = new TrayApplicationContext(controller, logger, settingsStore, appIcon, activationEvent, takeoverEvent);
+            using var trayContext = new TrayApplicationContext(controller, logger, settingsStore, appIcon, activationEvent, takeoverEvent, startupMode.IsQuietStartup);
             Application.Run(trayContext);
         }
         catch (Exception ex)
@@ -107,60 +103,57 @@ internal static class Program
         }
     }
 
+    private static StartupMode ResolveStartupMode(string[] args)
+    {
+        var marker = IsRunningElevated()
+            ? TryConsumeElevatedTaskStartupMarker()
+            : default;
+        var isElevatedTaskStartup = args.Any(static arg => string.Equals(arg, ElevatedTaskStartupArg, StringComparison.OrdinalIgnoreCase))
+            || marker.Exists;
+        var isQuietStartup = ShouldStartQuietly(args) && !marker.ShowMainWindow;
+        return new StartupMode(isQuietStartup, isElevatedTaskStartup);
+    }
+
     private static bool ShouldStartQuietly(string[] args)
     {
         return args.Any(static arg => string.Equals(arg, QuietStartupArg, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static bool IsElevatedTaskStartup(string[] args)
-    {
-        return args.Any(static arg => string.Equals(arg, ElevatedTaskStartupArg, StringComparison.OrdinalIgnoreCase))
-            || IsRunningElevated() && TryConsumeElevatedTaskStartupMarker();
-    }
-
-    private static bool TryConsumeElevatedTaskStartupMarker()
+    private static ElevatedTaskStartupMarker TryConsumeElevatedTaskStartupMarker()
     {
         try
         {
             var markerPath = GetElevatedTaskStartupMarkerPath();
             if (!File.Exists(markerPath))
             {
-                return false;
+                return default;
             }
 
             var markerAge = DateTimeOffset.Now - File.GetLastWriteTime(markerPath);
+            var markerText = File.ReadAllText(markerPath);
             File.Delete(markerPath);
-            return markerAge >= TimeSpan.Zero && markerAge <= ElevatedTaskStartupMarkerMaxAge;
+            if (markerAge < TimeSpan.Zero || markerAge > ElevatedTaskStartupMarkerMaxAge)
+            {
+                return default;
+            }
+
+            return new ElevatedTaskStartupMarker(
+                Exists: true,
+                ShowMainWindow: markerText.Contains("mode=show", StringComparison.OrdinalIgnoreCase));
         }
         catch (IOException)
         {
-            return false;
+            return default;
         }
         catch (UnauthorizedAccessException)
         {
-            return false;
+            return default;
         }
     }
 
     private static string GetElevatedTaskStartupMarkerPath()
     {
         return Path.Combine(GetCrashLogDirectory(), ElevatedTaskStartupMarkerFileName);
-    }
-
-    private static void ShowExistingInstanceHint()
-    {
-        try
-        {
-            MessageBox.Show(
-                "SleepSentinel 已在后台运行中，当前点击属于唤起已有实例。",
-                "SleepSentinel",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
-        }
-        catch
-        {
-            // Ignore UI errors when session or desktop is not ready.
-        }
     }
 
     private static void RegisterGlobalExceptionHandlers(string logDirectory)
@@ -211,12 +204,18 @@ internal static class Program
         }
     }
 
-    private static Mutex? AcquireSingleInstance(EventWaitHandle activationEvent, EventWaitHandle takeoverEvent, bool isElevatedTaskStartup)
+    private static Mutex? AcquireSingleInstance(EventWaitHandle activationEvent, EventWaitHandle takeoverEvent, StartupMode startupMode)
     {
         var singleInstance = TryCreatePrimaryInstanceMutex();
         if (singleInstance is not null)
         {
-            singleInstance = TrySwitchPrimaryRoleToElevatedTask(singleInstance, isElevatedTaskStartup);
+            singleInstance = ResolveUnexpectedDuplicateProcess(singleInstance, activationEvent, takeoverEvent);
+            if (singleInstance is null)
+            {
+                return null;
+            }
+
+            singleInstance = TrySwitchPrimaryRoleToElevatedTask(singleInstance, startupMode);
             if (singleInstance is null)
             {
                 return null;
@@ -240,14 +239,14 @@ internal static class Program
         return null;
     }
 
-    private static Mutex? TrySwitchPrimaryRoleToElevatedTask(Mutex singleInstance, bool isElevatedTaskStartup)
+    private static Mutex? TrySwitchPrimaryRoleToElevatedTask(Mutex singleInstance, StartupMode startupMode)
     {
-        if (IsRunningElevated() || isElevatedTaskStartup)
+        if (IsRunningElevated() || startupMode.IsElevatedTaskStartup || !startupMode.IsQuietStartup)
         {
             return singleInstance;
         }
 
-        if (!AutostartManager.TryStartElevatedScheduledTaskForCurrentExecutable(out _))
+        if (!AutostartManager.TryStartElevatedScheduledTaskForCurrentExecutable(showMainWindow: !startupMode.IsQuietStartup, out _))
         {
             return singleInstance;
         }
@@ -274,6 +273,25 @@ internal static class Program
         {
         }
 
+        return null;
+    }
+
+    private static Mutex? ResolveUnexpectedDuplicateProcess(Mutex singleInstance, EventWaitHandle activationEvent, EventWaitHandle takeoverEvent)
+    {
+        if (!IsAnotherSleepSentinelProcessRunning())
+        {
+            return singleInstance;
+        }
+
+        if (IsRunningElevated() && TryRequestExistingInstanceTakeover(takeoverEvent) && WaitForOtherSleepSentinelProcessesToExit())
+        {
+            LogStartupTrace("检测到已有低权限进程，已接管为当前高权限主实例。");
+            return singleInstance;
+        }
+
+        LogStartupTrace("检测到已有 SleepSentinel 进程，但当前实例仍获得了主实例锁；已放弃当前实例以避免重复窗口。");
+        TryActivateExistingInstance(activationEvent);
+        singleInstance.Dispose();
         return null;
     }
 
@@ -329,6 +347,94 @@ internal static class Program
         return false;
     }
 
+    private static bool WaitForOtherSleepSentinelProcessesToExit()
+    {
+        var deadlineTick = Environment.TickCount64 + TakeoverWaitMilliseconds;
+        while (Environment.TickCount64 < deadlineTick)
+        {
+            if (!IsAnotherSleepSentinelProcessRunning())
+            {
+                return true;
+            }
+
+            Thread.Sleep(TakeoverRetryIntervalMilliseconds);
+        }
+
+        return !IsAnotherSleepSentinelProcessRunning();
+    }
+
+    private static bool IsAnotherSleepSentinelProcessRunning()
+    {
+        var currentProcessId = Environment.ProcessId;
+        var currentPath = TryGetCurrentProcessPath();
+        var processName = Path.GetFileNameWithoutExtension(Application.ExecutablePath);
+
+        foreach (var process in Process.GetProcessesByName(processName))
+        {
+            using (process)
+            {
+                if (process.Id == currentProcessId)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (process.HasExited)
+                    {
+                        continue;
+                    }
+                }
+                catch (InvalidOperationException)
+                {
+                    continue;
+                }
+
+                var processPath = TryGetProcessPath(process);
+                if (string.IsNullOrWhiteSpace(currentPath)
+                    || string.IsNullOrWhiteSpace(processPath)
+                    || string.Equals(currentPath, processPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static string? TryGetCurrentProcessPath()
+    {
+        try
+        {
+            return Environment.ProcessPath;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryGetProcessPath(Process process)
+    {
+        try
+        {
+            return process.MainModule?.FileName;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return null;
+        }
+        catch (NotSupportedException)
+        {
+            return null;
+        }
+    }
+
     private static EventWaitHandle CreateGlobalEventWaitHandle(string name)
     {
         try
@@ -381,11 +487,7 @@ internal static class Program
         }
         catch (UnauthorizedAccessException)
         {
-            MessageBox.Show(
-                "SleepSentinel 已经在运行，但当前实例无法唤回它。",
-                "SleepSentinel",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+            LogStartupTrace("检测到已有实例，但当前实例没有权限发送唤醒信号。");
         }
     }
 
@@ -408,4 +510,8 @@ internal static class Program
         var principal = new WindowsPrincipal(identity);
         return principal.IsInRole(WindowsBuiltInRole.Administrator);
     }
+
+    private readonly record struct StartupMode(bool IsQuietStartup, bool IsElevatedTaskStartup);
+
+    private readonly record struct ElevatedTaskStartupMarker(bool Exists, bool ShowMainWindow);
 }

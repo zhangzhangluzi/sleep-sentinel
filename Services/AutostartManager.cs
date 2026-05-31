@@ -119,6 +119,11 @@ public static class AutostartManager
 
     public static bool TryStartElevatedScheduledTaskForCurrentExecutable(out string failureMessage)
     {
+        return TryStartElevatedScheduledTaskForCurrentExecutable(showMainWindow: false, out failureMessage);
+    }
+
+    public static bool TryStartElevatedScheduledTaskForCurrentExecutable(bool showMainWindow, out string failureMessage)
+    {
         failureMessage = string.Empty;
 
         var scheduledTask = QueryScheduledTask();
@@ -135,7 +140,7 @@ public static class AutostartManager
             return false;
         }
 
-        if (!TryWriteElevatedTaskStartupMarker(out failureMessage))
+        if (!TryWriteElevatedTaskStartupMarker(showMainWindow, out failureMessage))
         {
             return false;
         }
@@ -154,7 +159,7 @@ Start-ScheduledTask -TaskName '{ElevatedTaskName}' | Out-Null
         return false;
     }
 
-    private static bool TryWriteElevatedTaskStartupMarker(out string failureMessage)
+    private static bool TryWriteElevatedTaskStartupMarker(bool showMainWindow, out string failureMessage)
     {
         try
         {
@@ -162,7 +167,7 @@ Start-ScheduledTask -TaskName '{ElevatedTaskName}' | Out-Null
             Directory.CreateDirectory(markerDirectory);
             File.WriteAllText(
                 Path.Combine(markerDirectory, ElevatedTaskStartupMarkerFileName),
-                DateTimeOffset.Now.ToString("O"));
+                $"{DateTimeOffset.Now:O}{Environment.NewLine}mode={(showMainWindow ? "show" : "quiet")}");
             failureMessage = string.Empty;
             return true;
         }

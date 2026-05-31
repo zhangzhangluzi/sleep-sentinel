@@ -46,7 +46,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         SettingsStore settingsStore,
         Icon appIcon,
         EventWaitHandle activationSignal,
-        EventWaitHandle takeoverSignal)
+        EventWaitHandle takeoverSignal,
+        bool isQuietStartup)
     {
         _controller = controller;
         _logger = logger;
@@ -204,7 +205,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             Timeout.Infinite);
         RefreshTrayText();
 
-        if (!_controller.CurrentSettings.StartMinimized)
+        if (!isQuietStartup)
         {
             ShowMainForm();
         }

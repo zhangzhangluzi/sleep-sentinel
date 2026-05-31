@@ -8,11 +8,8 @@ public sealed class MainForm : Form
 {
     private const int MinimumWindowWidth = 1100;
     private const int MinimumWindowHeight = 760;
-    private const int MinimumRestoredWindowWidth = 1280;
-    private const int MinimumRestoredWindowHeight = 820;
     private const int PreferredWindowWidth = 1800;
     private const int PreferredWindowHeight = 920;
-    private const int MaximumSettingValueWidth = 680;
     private const int MaxVisibleLogLines = 400;
     private const int MaxVisibleLogCharacters = 120000;
     private const int MaxPendingLogLines = 800;
@@ -52,7 +49,6 @@ public sealed class MainForm : Form
     private readonly TextBox _detailsTextBox;
     private readonly TextBox _diagnosticsTextBox;
     private readonly TextBox _logTextBox;
-    private readonly Panel _settingsViewport;
     private readonly TableLayoutPanel _settingsPanel;
     private readonly FlowLayoutPanel _actionsFlow;
     private readonly Label _operationStatusLabel;
@@ -102,15 +98,16 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             ColumnCount = 1,
             RowCount = 7,
+            GrowStyle = TableLayoutPanelGrowStyle.FixedSize,
             Padding = new Padding(16)
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 46));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 54));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var versionLabel = new Label
         {
@@ -119,31 +116,22 @@ public sealed class MainForm : Form
             Font = new Font(Font, FontStyle.Bold),
             Text = $"当前版本：{AppVersionInfo.ShortDisplayVersion}"
         };
-        root.Controls.Add(versionLabel);
+        root.Controls.Add(versionLabel, 0, 0);
 
         var intro = new Label
         {
             Dock = DockStyle.Top,
             AutoSize = true,
-            MaximumSize = new Size(MinimumWindowWidth - 80, 0),
             Text = "让电脑在“该睡就睡”时不要被其他软件长期唤醒，同时保留类似 PowerToys Awake 的无限保持唤醒模式。设置现在会自动生效。"
         };
-        root.Controls.Add(intro);
-
-        _settingsViewport = new Panel
-        {
-            Dock = DockStyle.Fill,
-            AutoScroll = true,
-            MinimumSize = new Size(0, 230),
-            Padding = new Padding(0, 12, 0, 12)
-        };
-        _settingsViewport.Resize += (_, _) => AdjustSettingsLayout();
+        root.Controls.Add(intro, 0, 1);
 
         _settingsPanel = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             ColumnCount = 2,
-            AutoSize = true
+            AutoSize = true,
+            Padding = new Padding(0, 12, 0, 12)
         };
         _settingsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
         _settingsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -373,7 +361,7 @@ public sealed class MainForm : Form
         rayLinkProcessStormActions.Controls.Add(_rayLinkProcessStormQuickStateLabel);
         AddSettingRow(_settingsPanel, 9, "RayLink守护", rayLinkProcessStormActions);
 
-        var customRemoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        var customRemoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         var customRemoteWakeToolbar = CreateInlineFlow();
         var applyCustomRemoteWakeButton = new Button { Text = "应用名单", AutoSize = true };
         RegisterBusyDisabledControl(applyCustomRemoteWakeButton);
@@ -390,14 +378,13 @@ public sealed class MainForm : Form
         startupFlow.Controls.Add(_autostartCheckbox);
         AddSettingRow(_settingsPanel, 11, "启动行为", startupFlow);
 
-        _settingsViewport.Controls.Add(_settingsPanel);
-        root.Controls.Add(_settingsViewport);
+        root.Controls.Add(_settingsPanel, 0, 2);
 
         _actionsFlow = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
-            WrapContents = true,
+            WrapContents = false,
             Padding = new Padding(0, 0, 0, 12)
         };
 
@@ -430,7 +417,7 @@ public sealed class MainForm : Form
         _actionsFlow.Controls.Add(refreshLogButton);
         _actionsFlow.Controls.Add(diagnosticsButton);
         _actionsFlow.Controls.Add(exportReportButton);
-        root.Controls.Add(_actionsFlow);
+        root.Controls.Add(_actionsFlow, 0, 3);
 
         _operationStatusLabel = new Label
         {
@@ -440,7 +427,7 @@ public sealed class MainForm : Form
             Visible = false,
             Padding = new Padding(0, 0, 0, 8)
         };
-        root.Controls.Add(_operationStatusLabel);
+        root.Controls.Add(_operationStatusLabel, 0, 4);
 
         _statusLabel = new Label
         {
@@ -448,11 +435,12 @@ public sealed class MainForm : Form
             Dock = DockStyle.Top,
             Padding = new Padding(0, 0, 0, 12)
         };
-        root.Controls.Add(_statusLabel);
+        root.Controls.Add(_statusLabel, 0, 5);
 
         var tabs = new TabControl
         {
-            Dock = DockStyle.Fill
+            Dock = DockStyle.Fill,
+            MinimumSize = new Size(0, 180)
         };
 
         _detailsTextBox = CreateReadOnlyOutputTextBox();
@@ -463,7 +451,7 @@ public sealed class MainForm : Form
         tabs.TabPages.Add(CreateTabPage("状态详情", _detailsTextBox));
         tabs.TabPages.Add(CreateTabPage("诊断摘要", _diagnosticsTextBox));
         tabs.TabPages.Add(CreateTabPage("运行日志", _logTextBox));
-        root.Controls.Add(tabs);
+        root.Controls.Add(tabs, 0, 6);
 
         Controls.Add(root);
 
@@ -476,7 +464,6 @@ public sealed class MainForm : Form
         RefreshStatusAndDetails();
         _diagnosticsTextBox.Text = "最近诊断尚未刷新。点击“记录唤醒诊断”后，这里会显示 powercfg、事件日志和 SleepStudy 摘要。";
         LoadLogs();
-        AdjustSettingsLayout();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -1391,49 +1378,6 @@ public sealed class MainForm : Form
         _busyDisabledControls.Add(control);
     }
 
-    private void AdjustSettingsLayout()
-    {
-        if (IsDisposed)
-        {
-            return;
-        }
-
-        var availableWidth = _settingsViewport.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 8;
-        if (availableWidth <= 0)
-        {
-            return;
-        }
-
-        _settingsPanel.Width = Math.Max(availableWidth, 360);
-        var labelColumnWidth = Math.Min(220, Math.Max(180, availableWidth / 5));
-        _settingsPanel.ColumnStyles[0].Width = labelColumnWidth;
-
-        var valueColumnWidth = Math.Max(260, availableWidth - labelColumnWidth - 24);
-        var textWidth = Math.Min(Math.Max(240, valueColumnWidth - 16), MaximumSettingValueWidth);
-        _policyModeComboBox.Width = Math.Min(520, textWidth);
-        _customRemoteWakeTextBox.Width = Math.Max(260, textWidth);
-        ApplyMaximumControlWidth(_settingsPanel, textWidth);
-    }
-
-    private static void ApplyMaximumControlWidth(Control control, int maxWidth)
-    {
-        foreach (Control child in control.Controls)
-        {
-            if (child is FlowLayoutPanel)
-            {
-                child.MaximumSize = new Size(maxWidth, 0);
-                child.Width = maxWidth;
-            }
-
-            if (child is CheckBox or Label or RadioButton)
-            {
-                child.MaximumSize = new Size(maxWidth, 0);
-            }
-
-            ApplyMaximumControlWidth(child, maxWidth);
-        }
-    }
-
     private void ApplyInitialWindowBounds(AppSettings settings)
     {
         var workingArea = Screen.FromPoint(Cursor.Position).WorkingArea;
@@ -1441,8 +1385,8 @@ public sealed class MainForm : Form
         var defaultHeight = Math.Min(Math.Max(MinimumWindowHeight, (int)(workingArea.Height * 0.82)), Math.Min(PreferredWindowHeight, workingArea.Height));
 
         if (settings.WindowBoundsCaptured
-            && settings.WindowWidth >= MinimumRestoredWindowWidth
-            && settings.WindowHeight >= MinimumRestoredWindowHeight)
+            && settings.WindowWidth >= MinimumWindowWidth
+            && settings.WindowHeight >= MinimumWindowHeight)
         {
             var storedBounds = new Rectangle(settings.WindowX, settings.WindowY, settings.WindowWidth, settings.WindowHeight);
             Bounds = FitBoundsToWorkingArea(storedBounds, workingArea);
@@ -1510,8 +1454,8 @@ public sealed class MainForm : Form
         return new FlowLayoutPanel
         {
             AutoSize = true,
-            Dock = DockStyle.Fill,
-            WrapContents = true,
+            Dock = DockStyle.Left,
+            WrapContents = false,
             Margin = new Padding(0)
         };
     }
@@ -1521,7 +1465,7 @@ public sealed class MainForm : Form
         return new FlowLayoutPanel
         {
             AutoSize = true,
-            WrapContents = true,
+            WrapContents = false,
             Margin = new Padding(0)
         };
     }
@@ -1541,8 +1485,7 @@ public sealed class MainForm : Form
     private static Rectangle FitBoundsToWorkingArea(Rectangle bounds, Rectangle workingArea)
     {
         var width = Math.Min(Math.Max(bounds.Width, MinimumWindowWidth), workingArea.Width);
-        var maxUsefulHeight = Math.Min(PreferredWindowHeight, workingArea.Height);
-        var height = Math.Min(Math.Max(bounds.Height, MinimumWindowHeight), maxUsefulHeight);
+        var height = Math.Min(Math.Max(bounds.Height, MinimumWindowHeight), workingArea.Height);
         var maxX = workingArea.Right - width;
         var maxY = workingArea.Bottom - height;
         var x = width >= workingArea.Width
