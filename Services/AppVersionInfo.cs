@@ -18,8 +18,6 @@ internal static class AppVersionInfo
 
     public static string WindowTitle => $"{FullDisplayVersion}";
 
-    public static string TrayTitle => $"SleepSentinel {ShortDisplayVersion}";
-
     private static string ResolveVersion()
     {
         var assembly = typeof(AppVersionInfo).Assembly;

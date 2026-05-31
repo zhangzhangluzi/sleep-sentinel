@@ -60,7 +60,6 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开面板", null, (_, _) => ShowMainForm());
-        menu.Items.Add(new ToolStripMenuItem($"版本：{AppVersionInfo.DetailedDisplayVersion}") { Enabled = false });
         menu.Items.Add(new ToolStripSeparator());
 
         _followPowerPlanMenuItem = new ToolStripMenuItem("遵循电源计划");
@@ -344,7 +343,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void RefreshTrayText()
     {
         var settings = _controller.CurrentSettings;
-        var statusText = $"{AppVersionInfo.TrayTitle} - {_controller.CurrentStatus}";
+        var statusText = $"SleepSentinel - {_controller.CurrentStatus}";
         var trayText = statusText.Length > 63 ? statusText[..63] : statusText;
         if (!string.Equals(_cachedTrayText, trayText, StringComparison.Ordinal))
         {
@@ -352,7 +351,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             _cachedTrayText = trayText;
         }
 
-        _notifyIcon.BalloonTipTitle = AppVersionInfo.TrayTitle;
+        _notifyIcon.BalloonTipTitle = "SleepSentinel";
         var riskSummary = _controller.StartupWarmupCompleted
             ? _controller.CurrentRiskSummary
             : "SleepSentinel 已启动，详细状态会在后台补全。";

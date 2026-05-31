@@ -105,7 +105,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Top,
             AutoSize = true,
             Font = new Font(Font, FontStyle.Bold),
-            Text = $"当前运行版本：{AppVersionInfo.DetailedDisplayVersion}"
+            Text = $"当前版本：{AppVersionInfo.ShortDisplayVersion}"
         };
         root.Controls.Add(versionLabel);
 
@@ -138,7 +138,7 @@ public sealed class MainForm : Form
         _resumeProtectionCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "恢复后自动执行睡眠/休眠/锁屏，避免被软件唤醒后常驻亮机"
+            Text = "恢复后自动睡眠/休眠/锁屏，避免软件唤醒后常驻亮机"
         };
         _resumeProtectionCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
@@ -157,7 +157,7 @@ public sealed class MainForm : Form
         _onlyUnattendedWakeCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "仅在人工行为时跳过；人工包括键盘、鼠标、开盖、本地解锁/登录；远程接管默认按软件事件处理"
+            Text = "仅人工行为跳过；远程接管默认按软件事件处理"
         };
         _onlyUnattendedWakeCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
@@ -171,14 +171,14 @@ public sealed class MainForm : Form
         _disableStandbyConnectivityCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "关闭待机状态下的网络连接（AC/DC，减少 Windows Update/更新协调器在合盖待机时拉活）"
+            Text = "关闭待机联网（AC/DC）"
         };
         _disableStandbyConnectivityCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
         _disableWiFiDirectAdaptersCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "禁用 Microsoft Wi-Fi Direct 虚拟适配器（降低 S0 待机恢复异常；影响无线投屏/移动热点/附近共享）"
+            Text = "禁用 Microsoft Wi-Fi Direct 虚拟适配器"
         };
         _disableWiFiDirectAdaptersCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
@@ -203,28 +203,28 @@ public sealed class MainForm : Form
         _blockKnownRemoteWakeCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "拦截常见远程软件的保持唤醒请求（ToDesk、GameViewer/UU、AnyDesk、AnyViewer、TeamViewer、RustDesk、VNC）"
+            Text = "拦截常见远控和自定义名单的保持唤醒请求"
         };
         _blockKnownRemoteWakeCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
         _monitorRayLinkProcessStormCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "监控 RayLink 进程风暴（正常使用不处理）"
+            Text = "监控 RayLink 异常进程风暴"
         };
         _monitorRayLinkProcessStormCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
         _autoContainRayLinkProcessStormCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "命中风暴时自动止血（停止服务并结束 RayLink 进程树，不禁用服务）"
+            Text = "命中风暴时自动止血"
         };
         _autoContainRayLinkProcessStormCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
         _isolateRayLinkDuringSleepCheckbox = new CheckBox
         {
             AutoSize = true,
-            Text = "睡眠隔离 RayLink（合盖/睡眠前暂停，人工恢复后延迟恢复）"
+            Text = "睡眠前隔离 RayLink，人工恢复后延迟恢复"
         };
         _isolateRayLinkDuringSleepCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 

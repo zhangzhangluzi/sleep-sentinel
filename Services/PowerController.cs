@@ -2689,7 +2689,7 @@ public sealed class PowerController : IDisposable
 
         if (settings.ResumeProtectionOnlyForUnattendedWake)
         {
-            return $"人工行为（键盘、鼠标、开盖、解锁、控制台/远程接管、登录）恢复后跳过自动{resumeAction}；其他恢复（软件、定时器、设备、来源不明）会在 {delaySeconds} 秒后自动{resumeAction}。";
+            return $"人工行为（键盘、鼠标、开盖、本地解锁/登录、控制台接管）恢复后跳过自动{resumeAction}；远程接管和其他恢复（软件、定时器、设备、来源不明）会在 {delaySeconds} 秒后自动{resumeAction}。";
         }
 
         return $"不区分人工或非人工，系统每次恢复后都会在 {delaySeconds} 秒后自动{resumeAction}。";
