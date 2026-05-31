@@ -49,6 +49,9 @@ public sealed class MainForm : Form
     private readonly TextBox _detailsTextBox;
     private readonly TextBox _diagnosticsTextBox;
     private readonly TextBox _logTextBox;
+    private readonly TableLayoutPanel _settingsPanel;
+    private readonly FlowLayoutPanel _actionsFlow;
+    private readonly Label _operationStatusLabel;
     private readonly EventHandler _stateChangedHandler;
     private readonly Icon _appIcon;
     private bool _diagnosticsRefreshInProgress;
@@ -60,6 +63,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _logRenderTimer;
     private int _queuedStateRefresh;
     private int _remoteWakeSuggestionInProgress;
+    private int _backgroundOperationCount;
     private readonly SemaphoreSlim _controllerMutationGate = new(initialCount: 1);
     private int _pendingControllerMutationGeneration;
     private readonly Queue<string> _pendingLogLines = new();
@@ -90,15 +94,16 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 7,
             Padding = new Padding(16)
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 46));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 54));
 
         var versionLabel = new Label
         {
@@ -117,15 +122,22 @@ public sealed class MainForm : Form
         };
         root.Controls.Add(intro);
 
-        var settingsPanel = new TableLayoutPanel
+        var settingsViewport = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            MinimumSize = new Size(0, 230),
+            Padding = new Padding(0, 12, 0, 12)
+        };
+
+        _settingsPanel = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             ColumnCount = 2,
-            AutoSize = true,
-            Padding = new Padding(0, 12, 0, 12)
+            AutoSize = true
         };
-        settingsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
-        settingsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _settingsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
+        _settingsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
         _policyModeComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280 };
         _policyModeComboBox.Items.AddRange(
@@ -243,11 +255,11 @@ public sealed class MainForm : Form
         _autostartCheckbox = new CheckBox { AutoSize = true, Text = "开机自启" };
         _autostartCheckbox.CheckedChanged += (_, _) => ApplyUiSettingsImmediately();
 
-        AddSettingRow(settingsPanel, 0, "工作模式", _policyModeComboBox);
-        AddSettingRow(settingsPanel, 1, "恢复保护", _resumeProtectionCheckbox);
+        AddSettingRow(_settingsPanel, 0, "工作模式", _policyModeComboBox);
+        AddSettingRow(_settingsPanel, 1, "恢复保护", _resumeProtectionCheckbox);
 
-        var resumeOptionsFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
-        var resumeActionFlow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        var resumeOptionsFlow = CreateSettingFlow();
+        var resumeActionFlow = CreateInlineFlow();
         resumeActionFlow.Controls.Add(_resumeSleepRadioButton);
         resumeActionFlow.Controls.Add(_resumeHibernateRadioButton);
         resumeActionFlow.Controls.Add(_resumeLockScreenRadioButton);
@@ -255,10 +267,10 @@ public sealed class MainForm : Form
         resumeOptionsFlow.Controls.Add(resumeActionFlow);
         resumeOptionsFlow.Controls.Add(new Label { Text = "延迟秒数", AutoSize = true, Padding = new Padding(16, 7, 8, 0) });
         resumeOptionsFlow.Controls.Add(_resumeDelayInput);
-        AddSettingRow(settingsPanel, 2, "保护细节", resumeOptionsFlow);
-        AddSettingRow(settingsPanel, 3, "唤醒过滤", _onlyUnattendedWakeCheckbox);
+        AddSettingRow(_settingsPanel, 2, "保护细节", resumeOptionsFlow);
+        AddSettingRow(_settingsPanel, 3, "唤醒过滤", _onlyUnattendedWakeCheckbox);
 
-        var wakeTimerActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
+        var wakeTimerActions = CreateSettingFlow();
         var reapplyWakeTimerButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyWakeTimerButton.Click += (_, _) =>
         {
@@ -271,9 +283,9 @@ public sealed class MainForm : Form
         wakeTimerActions.Controls.Add(_disableWakeTimersCheckbox);
         wakeTimerActions.Controls.Add(reapplyWakeTimerButton);
         wakeTimerActions.Controls.Add(_wakeTimerQuickStateLabel);
-        AddSettingRow(settingsPanel, 4, "软件唤醒", wakeTimerActions);
+        AddSettingRow(_settingsPanel, 4, "软件唤醒", wakeTimerActions);
 
-        var standbyConnectivityActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
+        var standbyConnectivityActions = CreateSettingFlow();
         var reapplyStandbyConnectivityButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyStandbyConnectivityButton.Click += (_, _) =>
         {
@@ -286,9 +298,9 @@ public sealed class MainForm : Form
         standbyConnectivityActions.Controls.Add(_disableStandbyConnectivityCheckbox);
         standbyConnectivityActions.Controls.Add(reapplyStandbyConnectivityButton);
         standbyConnectivityActions.Controls.Add(_standbyConnectivityQuickStateLabel);
-        AddSettingRow(settingsPanel, 5, "待机联网", standbyConnectivityActions);
+        AddSettingRow(_settingsPanel, 5, "待机联网", standbyConnectivityActions);
 
-        var wifiDirectActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
+        var wifiDirectActions = CreateSettingFlow();
         var reapplyWiFiDirectButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyWiFiDirectButton.Click += (_, _) =>
         {
@@ -301,9 +313,9 @@ public sealed class MainForm : Form
         wifiDirectActions.Controls.Add(_disableWiFiDirectAdaptersCheckbox);
         wifiDirectActions.Controls.Add(reapplyWiFiDirectButton);
         wifiDirectActions.Controls.Add(_wifiDirectQuickStateLabel);
-        AddSettingRow(settingsPanel, 6, "无线稳态", wifiDirectActions);
+        AddSettingRow(_settingsPanel, 6, "无线稳态", wifiDirectActions);
 
-        var batteryStandbyHibernateActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
+        var batteryStandbyHibernateActions = CreateSettingFlow();
         var reapplyBatteryStandbyHibernateButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyBatteryStandbyHibernateButton.Click += (_, _) =>
         {
@@ -318,9 +330,9 @@ public sealed class MainForm : Form
         batteryStandbyHibernateActions.Controls.Add(_batteryStandbyHibernateTimeoutInput);
         batteryStandbyHibernateActions.Controls.Add(reapplyBatteryStandbyHibernateButton);
         batteryStandbyHibernateActions.Controls.Add(_batteryStandbyHibernateQuickStateLabel);
-        AddSettingRow(settingsPanel, 7, "电池兜底", batteryStandbyHibernateActions);
+        AddSettingRow(_settingsPanel, 7, "电池兜底", batteryStandbyHibernateActions);
 
-        var remoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
+        var remoteWakeActions = CreateSettingFlow();
         var reapplyRemoteWakeButton = new Button { Text = "重新应用", AutoSize = true };
         reapplyRemoteWakeButton.Click += (_, _) =>
         {
@@ -336,18 +348,18 @@ public sealed class MainForm : Form
         remoteWakeActions.Controls.Add(reapplyRemoteWakeButton);
         remoteWakeActions.Controls.Add(suggestRemoteWakeButton);
         remoteWakeActions.Controls.Add(_remoteWakeQuickStateLabel);
-        AddSettingRow(settingsPanel, 8, "远控拦截", remoteWakeActions);
+        AddSettingRow(_settingsPanel, 8, "远控拦截", remoteWakeActions);
 
-        var rayLinkProcessStormActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
+        var rayLinkProcessStormActions = CreateSettingFlow();
         _rayLinkProcessStormQuickStateLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
         rayLinkProcessStormActions.Controls.Add(_monitorRayLinkProcessStormCheckbox);
         rayLinkProcessStormActions.Controls.Add(_autoContainRayLinkProcessStormCheckbox);
         rayLinkProcessStormActions.Controls.Add(_isolateRayLinkDuringSleepCheckbox);
         rayLinkProcessStormActions.Controls.Add(_rayLinkProcessStormQuickStateLabel);
-        AddSettingRow(settingsPanel, 9, "RayLink守护", rayLinkProcessStormActions);
+        AddSettingRow(_settingsPanel, 9, "RayLink守护", rayLinkProcessStormActions);
 
-        var customRemoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, FlowDirection = FlowDirection.TopDown };
-        var customRemoteWakeToolbar = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+        var customRemoteWakeActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        var customRemoteWakeToolbar = CreateInlineFlow();
         var applyCustomRemoteWakeButton = new Button { Text = "应用名单", AutoSize = true };
         applyCustomRemoteWakeButton.Click += (_, _) => ApplyCustomRemoteEntriesFromUi();
         _customRemoteWakeHintLabel = new Label { AutoSize = true, Padding = new Padding(12, 7, 0, 0) };
@@ -355,19 +367,21 @@ public sealed class MainForm : Form
         customRemoteWakeToolbar.Controls.Add(_customRemoteWakeHintLabel);
         customRemoteWakeActions.Controls.Add(_customRemoteWakeTextBox);
         customRemoteWakeActions.Controls.Add(customRemoteWakeToolbar);
-        AddSettingRow(settingsPanel, 10, "自定义远控", customRemoteWakeActions);
+        AddSettingRow(_settingsPanel, 10, "自定义远控", customRemoteWakeActions);
 
-        var startupFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Left, WrapContents = false };
+        var startupFlow = CreateSettingFlow();
         startupFlow.Controls.Add(_startMinimizedCheckbox);
         startupFlow.Controls.Add(_autostartCheckbox);
-        AddSettingRow(settingsPanel, 11, "启动行为", startupFlow);
+        AddSettingRow(_settingsPanel, 11, "启动行为", startupFlow);
 
-        root.Controls.Add(settingsPanel);
+        settingsViewport.Controls.Add(_settingsPanel);
+        root.Controls.Add(settingsViewport);
 
-        var actionsFlow = new FlowLayoutPanel
+        _actionsFlow = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
+            WrapContents = true,
             Padding = new Padding(0, 0, 0, 12)
         };
 
@@ -390,13 +404,23 @@ public sealed class MainForm : Form
         var exportReportButton = new Button { Text = "导出诊断报告", AutoSize = true };
         exportReportButton.Click += async (_, _) => await ExportDiagnosticReportAsync();
 
-        actionsFlow.Controls.Add(reapplyAllButton);
-        actionsFlow.Controls.Add(sleepButton);
-        actionsFlow.Controls.Add(hibernateButton);
-        actionsFlow.Controls.Add(refreshLogButton);
-        actionsFlow.Controls.Add(diagnosticsButton);
-        actionsFlow.Controls.Add(exportReportButton);
-        root.Controls.Add(actionsFlow);
+        _actionsFlow.Controls.Add(reapplyAllButton);
+        _actionsFlow.Controls.Add(sleepButton);
+        _actionsFlow.Controls.Add(hibernateButton);
+        _actionsFlow.Controls.Add(refreshLogButton);
+        _actionsFlow.Controls.Add(diagnosticsButton);
+        _actionsFlow.Controls.Add(exportReportButton);
+        root.Controls.Add(_actionsFlow);
+
+        _operationStatusLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Top,
+            ForeColor = SystemColors.GrayText,
+            Visible = false,
+            Padding = new Padding(0, 0, 0, 8)
+        };
+        root.Controls.Add(_operationStatusLabel);
 
         _statusLabel = new Label
         {
@@ -538,6 +562,7 @@ public sealed class MainForm : Form
         }
 
         _logger.Info("开始后台扫描自定义远控候选项。");
+        BeginUiOperation("扫描远控候选项");
         _ = Task.Run(() =>
         {
             try
@@ -562,6 +587,7 @@ public sealed class MainForm : Form
             finally
             {
                 Interlocked.Exchange(ref _remoteWakeSuggestionInProgress, 0);
+                EndUiOperation();
             }
         });
     }
@@ -595,6 +621,7 @@ public sealed class MainForm : Form
         var generation = coalesce
             ? Interlocked.Increment(ref _pendingControllerMutationGeneration)
             : 0;
+        BeginUiOperation(actionName);
 
         _ = Task.Run(async () =>
         {
@@ -648,6 +675,8 @@ public sealed class MainForm : Form
                 {
                     RequestSyncUiFromController(includeDiagnostics: false);
                 }
+
+                EndUiOperation();
             }
         });
     }
@@ -1074,6 +1103,7 @@ public sealed class MainForm : Form
 
         _diagnosticsRefreshInProgress = true;
         UseWaitCursor = true;
+        BeginUiOperation("记录唤醒诊断");
 
         try
         {
@@ -1112,6 +1142,7 @@ public sealed class MainForm : Form
             {
                 UseWaitCursor = false;
             }
+            EndUiOperation();
         }
     }
 
@@ -1124,6 +1155,7 @@ public sealed class MainForm : Form
 
         _diagnosticExportInProgress = true;
         UseWaitCursor = true;
+        BeginUiOperation("导出诊断报告");
 
         try
         {
@@ -1148,6 +1180,7 @@ public sealed class MainForm : Form
             {
                 UseWaitCursor = false;
             }
+            EndUiOperation();
         }
     }
 
@@ -1256,6 +1289,58 @@ public sealed class MainForm : Form
             $"电池供电下在待机 {_batteryStandbyHibernateTimeoutInput.Value} 分钟后自动转入休眠（仅 DC，防止合盖后一夜耗尽）";
     }
 
+    private void BeginUiOperation(string actionName)
+    {
+        Interlocked.Increment(ref _backgroundOperationCount);
+        SetUiOperationBusyState(isBusy: true, actionName);
+    }
+
+    private void EndUiOperation()
+    {
+        var remaining = Interlocked.Decrement(ref _backgroundOperationCount);
+        if (remaining < 0)
+        {
+            remaining = 0;
+            Interlocked.Exchange(ref _backgroundOperationCount, 0);
+        }
+
+        if (remaining == 0)
+        {
+            SetUiOperationBusyState(isBusy: false, actionName: string.Empty);
+        }
+    }
+
+    private void SetUiOperationBusyState(bool isBusy, string actionName)
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            if (!IsHandleCreated)
+            {
+                return;
+            }
+
+            try
+            {
+                BeginInvoke(new Action(() => SetUiOperationBusyState(isBusy, actionName)));
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            return;
+        }
+
+        _settingsPanel.Enabled = !isBusy;
+        _actionsFlow.Enabled = !isBusy;
+        _operationStatusLabel.Visible = isBusy;
+        _operationStatusLabel.Text = isBusy ? $"正在执行：{actionName}..." : string.Empty;
+    }
+
     private void ApplyInitialWindowBounds(AppSettings settings)
     {
         var workingArea = Screen.FromPoint(Cursor.Position).WorkingArea;
@@ -1319,6 +1404,27 @@ public sealed class MainForm : Form
         var page = new TabPage(title);
         page.Controls.Add(content);
         return page;
+    }
+
+    private static FlowLayoutPanel CreateSettingFlow()
+    {
+        return new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            WrapContents = true,
+            Margin = new Padding(0)
+        };
+    }
+
+    private static FlowLayoutPanel CreateInlineFlow()
+    {
+        return new FlowLayoutPanel
+        {
+            AutoSize = true,
+            WrapContents = true,
+            Margin = new Padding(0)
+        };
     }
 
     private static TextBox CreateReadOnlyOutputTextBox()

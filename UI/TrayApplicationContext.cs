@@ -258,7 +258,6 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void ShowMainForm()
     {
         var mainForm = EnsureMainForm();
-        EnsureTrayIconVisible();
         mainForm.Show();
         mainForm.WindowState = FormWindowState.Normal;
         mainForm.RefreshFromController();
