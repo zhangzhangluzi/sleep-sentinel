@@ -11,6 +11,8 @@ public static class AutostartManager
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string ValueName = "SleepSentinel";
     private const string ElevatedTaskName = "SleepSentinel Elevated Autostart";
+    private const string ElevatedTaskArguments = "--quiet --elevated-task";
+    private const string ElevatedTaskStartupMarkerFileName = "elevated-task-start.marker";
     private const int ProcessTimeoutMilliseconds = 10000;
     private static readonly string WindowsPowerShellPath = ResolveWindowsPowerShellPath();
     private static readonly Regex CliXmlEnvelopeRegex = new(@"#<\s*CLIXML\s*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -36,6 +38,7 @@ public static class AutostartManager
 
         var elevatedTaskEnabled = scheduledTask.Exists
             && scheduledTask.MatchesExecutablePath
+            && scheduledTask.MatchesArguments
             && scheduledTask.RunLevel.Equals("Highest", StringComparison.OrdinalIgnoreCase);
 
         var actualMode = scheduledTask.Exists
@@ -73,6 +76,8 @@ public static class AutostartManager
                             : "检测到普通权限开机自启残留指向旧路径，建议重新应用切回最高权限任务"
                         : scheduledTask.Exists && !scheduledTask.MatchesExecutablePath
                             ? "检测到同名计划任务，但目标程序不是当前版本，建议重新应用开机自启"
+                            : scheduledTask.Exists && !scheduledTask.MatchesArguments
+                                ? "检测到同名计划任务缺少启动保护参数，建议重新应用开机自启"
                             : scheduledTask.Exists
                                 ? "检测到同名计划任务，但未以最高权限运行，建议重新应用开机自启"
                                 : "开机自启尚未配置为最高权限启动");
@@ -130,6 +135,11 @@ public static class AutostartManager
             return false;
         }
 
+        if (!TryWriteElevatedTaskStartupMarker(out failureMessage))
+        {
+            return false;
+        }
+
         var script = $@"
 $ErrorActionPreference = 'Stop'
 Start-ScheduledTask -TaskName '{ElevatedTaskName}' | Out-Null
@@ -142,6 +152,25 @@ Start-ScheduledTask -TaskName '{ElevatedTaskName}' | Out-Null
 
         failureMessage = output;
         return false;
+    }
+
+    private static bool TryWriteElevatedTaskStartupMarker(out string failureMessage)
+    {
+        try
+        {
+            var markerDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SleepSentinel");
+            Directory.CreateDirectory(markerDirectory);
+            File.WriteAllText(
+                Path.Combine(markerDirectory, ElevatedTaskStartupMarkerFileName),
+                DateTimeOffset.Now.ToString("O"));
+            failureMessage = string.Empty;
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            failureMessage = $"写入最高权限启动标记失败：{ex.Message}";
+            return false;
+        }
     }
 
     private static AutostartStatus BuildScheduledTaskQueryFailureStatus(bool enabled, bool requireElevated, RunKeyStatus runKeyStatus, string queryError)
@@ -265,20 +294,22 @@ Start-ScheduledTask -TaskName '{ElevatedTaskName}' | Out-Null
 
         if (IsPowerShellFailure(output))
         {
-            return new ScheduledTaskInfo(false, false, string.Empty, output);
+            return new ScheduledTaskInfo(false, false, false, string.Empty, output);
         }
 
         var parts = output.Split('\t');
         if (parts.Length < 2)
         {
-            return new ScheduledTaskInfo(false, false, string.Empty, $"计划任务输出无法识别：{output}");
+            return new ScheduledTaskInfo(false, false, false, string.Empty, $"计划任务输出无法识别：{output}");
         }
 
         var executePath = NormalizeExecutablePath(parts[1]);
+        var arguments = parts.Length >= 3 ? parts[2] : string.Empty;
         var currentExecutablePath = NormalizeExecutablePath(Application.ExecutablePath);
         return new ScheduledTaskInfo(
             true,
             string.Equals(executePath, currentExecutablePath, StringComparison.OrdinalIgnoreCase),
+            MatchesElevatedTaskArguments(arguments),
             parts[0],
             string.Empty);
     }
@@ -289,7 +320,7 @@ Start-ScheduledTask -TaskName '{ElevatedTaskName}' | Out-Null
         var userId = EscapePowerShellString(WindowsIdentity.GetCurrent().Name);
         var script = $@"
 $ErrorActionPreference = 'Stop'
-$action = New-ScheduledTaskAction -Execute '{executablePath}'
+$action = New-ScheduledTaskAction -Execute '{executablePath}' -Argument '{ElevatedTaskArguments}'
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User '{userId}'
 $principal = New-ScheduledTaskPrincipal -UserId '{userId}' -LogonType Interactive -RunLevel Highest
 Register-ScheduledTask -TaskName '{ElevatedTaskName}' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
@@ -450,7 +481,12 @@ if (Get-ScheduledTask -TaskName '{ElevatedTaskName}' -ErrorAction SilentlyContin
         }
     }
 
-    private readonly record struct ScheduledTaskInfo(bool Exists, bool MatchesExecutablePath, string RunLevel, string QueryError)
+    private static bool MatchesElevatedTaskArguments(string arguments)
+    {
+        return string.Equals(arguments.Trim(), ElevatedTaskArguments, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private readonly record struct ScheduledTaskInfo(bool Exists, bool MatchesExecutablePath, bool MatchesArguments, string RunLevel, string QueryError)
     {
         public bool QueryFailed => !string.IsNullOrWhiteSpace(QueryError);
     }

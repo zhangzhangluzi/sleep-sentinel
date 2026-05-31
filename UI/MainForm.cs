@@ -8,8 +8,11 @@ public sealed class MainForm : Form
 {
     private const int MinimumWindowWidth = 1100;
     private const int MinimumWindowHeight = 760;
+    private const int MinimumRestoredWindowWidth = 1280;
+    private const int MinimumRestoredWindowHeight = 820;
     private const int PreferredWindowWidth = 1800;
-    private const int PreferredWindowHeight = 1180;
+    private const int PreferredWindowHeight = 920;
+    private const int MaximumSettingValueWidth = 680;
     private const int MaxVisibleLogLines = 400;
     private const int MaxVisibleLogCharacters = 120000;
     private const int MaxPendingLogLines = 800;
@@ -122,6 +125,7 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Top,
             AutoSize = true,
+            MaximumSize = new Size(MinimumWindowWidth - 80, 0),
             Text = "让电脑在“该睡就睡”时不要被其他软件长期唤醒，同时保留类似 PowerToys Awake 的无限保持唤醒模式。设置现在会自动生效。"
         };
         root.Controls.Add(intro);
@@ -1303,7 +1307,7 @@ public sealed class MainForm : Form
     private void UpdateBatteryStandbyHibernateCheckboxText()
     {
         _enforceBatteryStandbyHibernateCheckbox.Text =
-            $"电池供电下在待机 {_batteryStandbyHibernateTimeoutInput.Value} 分钟后自动转入休眠（仅 DC，防止合盖后一夜耗尽）";
+            $"电池供电待机 {_batteryStandbyHibernateTimeoutInput.Value} 分钟后自动休眠（仅 DC）";
     }
 
     private int BeginUiOperation(string actionName)
@@ -1401,23 +1405,32 @@ public sealed class MainForm : Form
         }
 
         _settingsPanel.Width = Math.Max(availableWidth, 360);
-        var valueColumnWidth = Math.Max(260, availableWidth - 240);
-        var textWidth = Math.Max(240, valueColumnWidth - 24);
-        _policyModeComboBox.Width = Math.Min(280, textWidth);
+        var labelColumnWidth = Math.Min(220, Math.Max(180, availableWidth / 5));
+        _settingsPanel.ColumnStyles[0].Width = labelColumnWidth;
+
+        var valueColumnWidth = Math.Max(260, availableWidth - labelColumnWidth - 24);
+        var textWidth = Math.Min(Math.Max(240, valueColumnWidth - 16), MaximumSettingValueWidth);
+        _policyModeComboBox.Width = Math.Min(520, textWidth);
         _customRemoteWakeTextBox.Width = Math.Max(260, textWidth);
-        ApplyMaximumTextWidth(_settingsPanel, textWidth);
+        ApplyMaximumControlWidth(_settingsPanel, textWidth);
     }
 
-    private static void ApplyMaximumTextWidth(Control control, int maxWidth)
+    private static void ApplyMaximumControlWidth(Control control, int maxWidth)
     {
         foreach (Control child in control.Controls)
         {
+            if (child is FlowLayoutPanel)
+            {
+                child.MaximumSize = new Size(maxWidth, 0);
+                child.Width = maxWidth;
+            }
+
             if (child is CheckBox or Label or RadioButton)
             {
                 child.MaximumSize = new Size(maxWidth, 0);
             }
 
-            ApplyMaximumTextWidth(child, maxWidth);
+            ApplyMaximumControlWidth(child, maxWidth);
         }
     }
 
@@ -1425,11 +1438,11 @@ public sealed class MainForm : Form
     {
         var workingArea = Screen.FromPoint(Cursor.Position).WorkingArea;
         var defaultWidth = Math.Min(Math.Max(MinimumWindowWidth, (int)(workingArea.Width * 0.86)), Math.Min(PreferredWindowWidth, workingArea.Width));
-        var defaultHeight = Math.Min(Math.Max(MinimumWindowHeight, (int)(workingArea.Height * 0.88)), Math.Min(PreferredWindowHeight, workingArea.Height));
+        var defaultHeight = Math.Min(Math.Max(MinimumWindowHeight, (int)(workingArea.Height * 0.82)), Math.Min(PreferredWindowHeight, workingArea.Height));
 
         if (settings.WindowBoundsCaptured
-            && settings.WindowWidth >= MinimumWindowWidth
-            && settings.WindowHeight >= MinimumWindowHeight)
+            && settings.WindowWidth >= MinimumRestoredWindowWidth
+            && settings.WindowHeight >= MinimumRestoredWindowHeight)
         {
             var storedBounds = new Rectangle(settings.WindowX, settings.WindowY, settings.WindowWidth, settings.WindowHeight);
             Bounds = FitBoundsToWorkingArea(storedBounds, workingArea);
@@ -1457,7 +1470,13 @@ public sealed class MainForm : Form
 
         try
         {
-            _controller.UpdateWindowBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height);
+            var workingArea = Screen.FromPoint(Cursor.Position).WorkingArea;
+            var normalizedBounds = FitBoundsToWorkingArea(bounds, workingArea);
+            _controller.UpdateWindowBounds(
+                normalizedBounds.X,
+                normalizedBounds.Y,
+                normalizedBounds.Width,
+                normalizedBounds.Height);
         }
         catch (IOException ex)
         {
@@ -1522,7 +1541,8 @@ public sealed class MainForm : Form
     private static Rectangle FitBoundsToWorkingArea(Rectangle bounds, Rectangle workingArea)
     {
         var width = Math.Min(Math.Max(bounds.Width, MinimumWindowWidth), workingArea.Width);
-        var height = Math.Min(Math.Max(bounds.Height, MinimumWindowHeight), workingArea.Height);
+        var maxUsefulHeight = Math.Min(PreferredWindowHeight, workingArea.Height);
+        var height = Math.Min(Math.Max(bounds.Height, MinimumWindowHeight), maxUsefulHeight);
         var maxX = workingArea.Right - width;
         var maxY = workingArea.Bottom - height;
         var x = width >= workingArea.Width

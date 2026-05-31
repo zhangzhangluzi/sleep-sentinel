@@ -2,6 +2,7 @@ using SleepSentinel.Services;
 using SleepSentinel.UI;
 using System.Linq;
 using System.Text;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Threading.Tasks;
 
@@ -13,9 +14,12 @@ internal static class Program
     private const string ActivationEventName = @"Global\SleepSentinel.ActivateExisting";
     private const string TakeoverEventName = @"Global\SleepSentinel.TakeoverPrimary";
     private const string QuietStartupArg = "--quiet";
-    private const int TakeoverWaitMilliseconds = 5000;
+    private const string ElevatedTaskStartupArg = "--elevated-task";
+    private const string ElevatedTaskStartupMarkerFileName = "elevated-task-start.marker";
+    private const int TakeoverWaitMilliseconds = 20000;
     private const int ElevatedTaskBootstrapWaitMilliseconds = 8000;
     private const int TakeoverRetryIntervalMilliseconds = 250;
+    private static readonly TimeSpan ElevatedTaskStartupMarkerMaxAge = TimeSpan.FromMinutes(2);
 
     [STAThread]
     private static void Main(string[] args)
@@ -25,10 +29,11 @@ internal static class Program
         RegisterGlobalExceptionHandlers(crashDirectory);
         TrySetUnhandledExceptionMode(startupCrashLogPath);
         var isQuietStartup = ShouldStartQuietly(args);
+        var isElevatedTaskStartup = IsElevatedTaskStartup(args);
 
-        using var activationEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivationEventName);
-        using var takeoverEvent = new EventWaitHandle(false, EventResetMode.AutoReset, TakeoverEventName);
-        using var singleInstance = AcquireSingleInstance(activationEvent, takeoverEvent);
+        using var activationEvent = CreateGlobalEventWaitHandle(ActivationEventName);
+        using var takeoverEvent = CreateGlobalEventWaitHandle(TakeoverEventName);
+        using var singleInstance = AcquireSingleInstance(activationEvent, takeoverEvent, isElevatedTaskStartup);
         if (singleInstance is null)
         {
             LogStartupTrace("检测到已有实例在运行，已尝试激活现有实例。");
@@ -107,6 +112,41 @@ internal static class Program
         return args.Any(static arg => string.Equals(arg, QuietStartupArg, StringComparison.OrdinalIgnoreCase));
     }
 
+    private static bool IsElevatedTaskStartup(string[] args)
+    {
+        return args.Any(static arg => string.Equals(arg, ElevatedTaskStartupArg, StringComparison.OrdinalIgnoreCase))
+            || IsRunningElevated() && TryConsumeElevatedTaskStartupMarker();
+    }
+
+    private static bool TryConsumeElevatedTaskStartupMarker()
+    {
+        try
+        {
+            var markerPath = GetElevatedTaskStartupMarkerPath();
+            if (!File.Exists(markerPath))
+            {
+                return false;
+            }
+
+            var markerAge = DateTimeOffset.Now - File.GetLastWriteTime(markerPath);
+            File.Delete(markerPath);
+            return markerAge >= TimeSpan.Zero && markerAge <= ElevatedTaskStartupMarkerMaxAge;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static string GetElevatedTaskStartupMarkerPath()
+    {
+        return Path.Combine(GetCrashLogDirectory(), ElevatedTaskStartupMarkerFileName);
+    }
+
     private static void ShowExistingInstanceHint()
     {
         try
@@ -171,12 +211,12 @@ internal static class Program
         }
     }
 
-    private static Mutex? AcquireSingleInstance(EventWaitHandle activationEvent, EventWaitHandle takeoverEvent)
+    private static Mutex? AcquireSingleInstance(EventWaitHandle activationEvent, EventWaitHandle takeoverEvent, bool isElevatedTaskStartup)
     {
         var singleInstance = TryCreatePrimaryInstanceMutex();
         if (singleInstance is not null)
         {
-            singleInstance = TrySwitchPrimaryRoleToElevatedTask(singleInstance);
+            singleInstance = TrySwitchPrimaryRoleToElevatedTask(singleInstance, isElevatedTaskStartup);
             if (singleInstance is null)
             {
                 return null;
@@ -192,15 +232,17 @@ internal static class Program
             {
                 return singleInstance;
             }
+
+            LogStartupTrace("已请求低权限实例退出，但等待主实例锁释放超时。");
         }
 
         TryActivateExistingInstance(activationEvent);
         return null;
     }
 
-    private static Mutex? TrySwitchPrimaryRoleToElevatedTask(Mutex singleInstance)
+    private static Mutex? TrySwitchPrimaryRoleToElevatedTask(Mutex singleInstance, bool isElevatedTaskStartup)
     {
-        if (IsRunningElevated())
+        if (IsRunningElevated() || isElevatedTaskStartup)
         {
             return singleInstance;
         }
@@ -218,13 +260,20 @@ internal static class Program
 
     private static Mutex? TryCreatePrimaryInstanceMutex()
     {
-        var singleInstance = new Mutex(true, SingleInstanceMutexName, out var createdNew);
-        if (createdNew)
+        try
         {
-            return singleInstance;
+            var singleInstance = MutexAcl.Create(true, SingleInstanceMutexName, out var createdNew, CreateGlobalMutexSecurity());
+            if (createdNew)
+            {
+                return singleInstance;
+            }
+
+            singleInstance.Dispose();
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
 
-        singleInstance.Dispose();
         return null;
     }
 
@@ -263,17 +312,65 @@ internal static class Program
     {
         try
         {
-            using var singleInstance = Mutex.OpenExisting(SingleInstanceMutexName);
-            return true;
+            if (MutexAcl.TryOpenExisting(SingleInstanceMutexName, MutexRights.Synchronize, out var singleInstance))
+            {
+                singleInstance.Dispose();
+                return true;
+            }
         }
         catch (WaitHandleCannotBeOpenedException)
         {
-            return false;
         }
         catch (UnauthorizedAccessException)
         {
             return true;
         }
+
+        return false;
+    }
+
+    private static EventWaitHandle CreateGlobalEventWaitHandle(string name)
+    {
+        try
+        {
+            return EventWaitHandleAcl.Create(
+                false,
+                EventResetMode.AutoReset,
+                name,
+                out _,
+                CreateGlobalEventSecurity());
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return EventWaitHandleAcl.OpenExisting(
+                name,
+                EventWaitHandleRights.Modify | EventWaitHandleRights.Synchronize);
+        }
+    }
+
+    private static MutexSecurity CreateGlobalMutexSecurity()
+    {
+        var security = new MutexSecurity();
+        security.AddAccessRule(new MutexAccessRule(
+            CreateCrossIntegrityAccessSid(),
+            MutexRights.FullControl,
+            AccessControlType.Allow));
+        return security;
+    }
+
+    private static EventWaitHandleSecurity CreateGlobalEventSecurity()
+    {
+        var security = new EventWaitHandleSecurity();
+        security.AddAccessRule(new EventWaitHandleAccessRule(
+            CreateCrossIntegrityAccessSid(),
+            EventWaitHandleRights.FullControl,
+            AccessControlType.Allow));
+        return security;
+    }
+
+    private static SecurityIdentifier CreateCrossIntegrityAccessSid()
+    {
+        return new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null);
     }
 
     private static void TryActivateExistingInstance(EventWaitHandle activationEvent)
